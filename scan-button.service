@@ -10,7 +10,7 @@ RestartSec=5
 # Environment for desktop notifications
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# PAPERLESS_URL and PAPERLESS_TOKEN come from ~/.config/environment.d/paperless.conf
+# Scanner settings come from ~/.config/environment.d/scanner.conf
 
 [Install]
 WantedBy=default.target
