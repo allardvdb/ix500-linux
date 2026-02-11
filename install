@@ -71,6 +71,11 @@ if [ "$MODE" = "paperless" ]; then
     check_cmd curl "" "curl" || DEPS_OK=false
 fi
 
+# Notification dependencies
+check_cmd notify-send "libnotify" "libnotify" || DEPS_OK=false
+check_cmd xdg-open "" "xdg-utils" || DEPS_OK=false
+check_cmd xdg-terminal-exec "" "xdg-terminal-exec" || DEPS_OK=false
+
 echo
 
 if [ "$DEPS_OK" = false ]; then

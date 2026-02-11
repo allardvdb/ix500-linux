@@ -31,11 +31,11 @@ else
 fi
 
 TIMESTAMP=$(date '+%Y-%m-%d-%H%M%S')
-TMPDIR=$(mktemp -d)
+WORKDIR=$(mktemp -d)
 FILENAME="${1:-scan-$TIMESTAMP}"
 
 cleanup() {
-    rm -rf "$TMPDIR"
+    rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
@@ -53,12 +53,12 @@ scanimage --device "$DEVICE" \
     --overscan On \
     --prepick On \
     --buffermode On \
-    --batch="$TMPDIR/page-%04d.tiff" \
+    --batch="$WORKDIR/page-%04d.tiff" \
     --batch-count=-1 \
     2>&1 | grep -v "^$" || true
 
 # Count scanned pages
-PAGECOUNT=$(ls -1 "$TMPDIR"/page-*.tiff 2>/dev/null | wc -l)
+PAGECOUNT=$(ls -1 "$WORKDIR"/page-*.tiff 2>/dev/null | wc -l)
 
 if [ "$PAGECOUNT" -eq 0 ]; then
     echo "No pages scanned (feeder empty?)"
@@ -67,11 +67,11 @@ fi
 
 echo "Scanned $PAGECOUNT page(s), detecting color..."
 
-# Auto-detect color vs grayscale for each page
+# Auto-detect color vs grayscale for each page (reduces file size for upload too)
 # Convert to grayscale if saturation is low (no significant color)
 COLOR_PAGES=0
 GRAY_PAGES=0
-for tiff in "$TMPDIR"/page-*.tiff; do
+for tiff in "$WORKDIR"/page-*.tiff; do
     # Check color saturation - if mean saturation < 10%, convert to grayscale
     saturation=$(magick "$tiff" -colorspace HSL -channel G -separate +channel -format "%[fx:mean*100]" info: 2>/dev/null || echo "0")
     if (( $(echo "$saturation < 10" | bc -l) )); then
@@ -92,18 +92,18 @@ fi
 
 if [ "$MODE" = "paperless" ]; then
     echo "Creating PDF..."
-    magick "$TMPDIR"/page-*.tiff "$TMPDIR/$FILENAME.pdf"
+    magick "$WORKDIR"/page-*.tiff "$WORKDIR/$FILENAME.pdf"
 
     echo "Uploading to Paperless..."
     RESPONSE=$(curl -sk -w "\n%{http_code}" \
         -H "Authorization: Token $PAPERLESS_TOKEN" \
-        -F "document=@$TMPDIR/$FILENAME.pdf" \
+        -F "document=@$WORKDIR/$FILENAME.pdf" \
         -F "created=$(date '+%Y-%m-%d')" \
         "$PAPERLESS_URL/api/documents/post_document/")
 
     HTTP_CODE=$(echo "$RESPONSE" | tail -1)
     if [ "$HTTP_CODE" -eq 200 ]; then
-        FILESIZE=$(ls -lh "$TMPDIR/$FILENAME.pdf" | awk '{print $5}')
+        FILESIZE=$(ls -lh "$WORKDIR/$FILENAME.pdf" | awk '{print $5}')
         echo "Done: $FILENAME.pdf ($PAGECOUNT pages, $FILESIZE) uploaded to Paperless"
     else
         echo "Upload failed (HTTP $HTTP_CODE)"
@@ -117,8 +117,8 @@ else
     mkdir -p "$OUTDIR"
 
     echo "Running OCR..."
-    magick "$TMPDIR"/page-*.tiff "$TMPDIR/combined.tiff"
-    ocrmypdf "$TMPDIR/combined.tiff" "$OUTFILE" \
+    magick "$WORKDIR"/page-*.tiff "$WORKDIR/combined.tiff"
+    ocrmypdf "$WORKDIR/combined.tiff" "$OUTFILE" \
         -l nld+eng \
         --rotate-pages \
         --rotate-pages-threshold 2 \

@@ -1,8 +1,8 @@
 # ix500-linux
 
-One-button scanning workflow for Fujitsu ScanSnap iX500 on Linux.
+One-button scanning workflow for [Fujitsu ScanSnap iX500](https://www.fujitsu.com/global/products/computing/peripheral/scanners/scansnap/ix500/) on Linux.
 
-Press the scanner button → get a searchable PDF with OCR. That's it.
+Press the scanner button → get a PDF. That's it.
 
 ## Features
 
@@ -10,13 +10,15 @@ Press the scanner button → get a searchable PDF with OCR. That's it.
 - **Duplex A4 color** - scans both sides automatically
 - **Smart blank detection** - skips empty back pages (20% threshold)
 - **Auto color/grayscale** - converts B&W pages to grayscale for smaller files
-- **OCR** - searchable text with Dutch + English (configurable)
-- **Auto-rotate** - fixes upside-down pages automatically
-- **Image cleanup** - deskew, crop borders, remove speckles
-- **Aggressive compression** - ~95% smaller than raw scans
-- **PDF/A-2b output** - archival quality
-- **Desktop notifications** - know when your scan is done
+- **Two output modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) or save locally with OCR
+- **Clickable notifications** - open the result directly from the notification
 - **Robust disconnect handling** - no crashes when scanner is unplugged
+
+### Paperless-ngx mode (recommended)
+When `PAPERLESS_URL` and `PAPERLESS_TOKEN` are set, scans are uploaded directly to Paperless-ngx via its API. Paperless handles OCR, archiving, compression, and search.
+
+### Local mode
+Without Paperless configured, scans are processed locally with ocrmypdf (Dutch + English OCR, auto-rotate, deskew, cleanup) and saved to `~/Documents/scanner-inbox/`.
 
 ## Requirements
 
@@ -24,54 +26,64 @@ Press the scanner button → get a searchable PDF with OCR. That's it.
 - `sane` / `sane-backends` - scanner driver (usually pre-installed)
 
 ### Homebrew packages
+
+For both modes:
+```bash
+brew install imagemagick
+```
+
+For local mode (OCR):
 ```bash
 brew install ocrmypdf tesseract tesseract-lang
 ```
 
-### Tesseract symlinks
-Brew doesn't always link these automatically. Check if they exist and create if needed:
-```bash
-# Check your tesseract version
-TESS_VERSION=$(brew list --versions tesseract | awk '{print $2}')
-
-# Create symlinks if missing
-ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/eng.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
-ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/osd.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
-```
-
 ## Installation
 
-### 1. Verify scanner is detected
+### Quick install
+```bash
+./install
+```
+
+The interactive installer checks dependencies, asks for Paperless or local mode, configures credentials, and activates the service.
+
+### Manual installation
+
+#### 1. Verify scanner is detected
 ```bash
 scanimage -L
 # Should show: device `fujitsu:ScanSnap iX500:XXXXX'
 ```
 
-### 2. Install scripts
+#### 2. Install scripts
 ```bash
-# Copy scan scripts
-cp scan ~/.local/bin/scan
-cp scan-button-poll ~/.local/bin/scan-button-poll
+cp scan scan-button-poll ~/.local/bin/
 chmod +x ~/.local/bin/scan ~/.local/bin/scan-button-poll
-
-# Scripts auto-detect scanner - no manual configuration needed
 ```
 
-### 3. Install systemd user service
+#### 3. Configure Paperless (optional)
+```bash
+mkdir -p ~/.config/environment.d
+cat > ~/.config/environment.d/paperless.conf <<EOF
+PAPERLESS_URL=https://paperless.example.com
+PAPERLESS_TOKEN=your-api-token
+EOF
+```
+
+#### 4. Install systemd user service
 ```bash
 cp scan-button.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable scan-button.service
 ```
 
-### 4. Install udev rule (for auto start on USB connect)
+#### 5. Install udev rule (for auto start on USB connect)
 ```bash
 sudo cp 99-scansnap-ix500.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-### 5. Start the service
+#### 6. Start the service
 ```bash
 systemctl --user start scan-button.service
 ```
@@ -82,7 +94,7 @@ systemctl --user start scan-button.service
 1. Put documents in the feeder
 2. Press the blue Scan button on the scanner
 3. Wait for desktop notification "Scan Complete"
-4. Find your PDF in `~/Documents/scanner-inbox/`
+4. Click the notification to open the result
 
 ### Manual scanning
 ```bash
@@ -109,7 +121,7 @@ journalctl --user -u scan-button.service -f
 | `--prepick` | On | Pre-pick next page (faster) |
 | `--buffermode` | On | Faster processing |
 
-### OCR options (in `scan`)
+### OCR options (local mode only, in `scan`)
 
 | Option | Value | Purpose |
 |--------|-------|---------|
@@ -133,26 +145,20 @@ Pages with <10% color saturation are converted to grayscale automatically.
                     ┌─────────────────────────────┘
                     ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  scanimage  │────▶│ ImageMagick  │────▶│ ocrmypdf        │
-│  (SANE)     │     │ (combine)    │     │ (OCR + PDF)     │
+│  scanimage  │────▶│ ImageMagick  │────▶│ Paperless-ngx   │
+│  (SANE)     │     │ (PDF)        │     │ or ocrmypdf     │
 └─────────────┘     └──────────────┘     └─────────────────┘
-                                                  │
-                                                  ▼
-                                         ┌─────────────────┐
-                                         │ ~/Documents/    │
-                                         │ scanner-inbox/  │
-                                         └─────────────────┘
 ```
 
-1. **Button poll service** checks scanner button every 500ms
+1. **Button poll service** checks scanner button every 100ms
 2. **scanimage** captures duplex color TIFF pages
-3. **ImageMagick** combines pages, detects color vs grayscale
-4. **ocrmypdf** adds OCR layer, optimizes, outputs PDF/A-2b
-5. **Desktop notification** confirms completion
+3. **ImageMagick** combines pages, detects color vs grayscale, creates PDF
+4. **Paperless-ngx** receives the upload (or **ocrmypdf** processes locally)
+5. **Clickable notification** confirms completion
 
 ## Tested on
 
-- **OS**: Bluefin (Fedora Silverblue based)
+- **OS**: [Bluefin](https://projectbluefin.io/) (Fedora Silverblue based)
 - **Scanner**: Fujitsu ScanSnap iX500
 - **SANE**: sane-backends with fujitsu driver
 
@@ -163,6 +169,16 @@ Should work on any Linux with SANE support for the iX500.
 - [Rida Ayed's ix500 Linux guide](https://ridaayed.com/posts/setup_fujitsu_ix500_scanner_linux/) - scanner options and swskip threshold
 - [foxey/scanbdScanSnapIntegration](https://github.com/foxey/scanbdScanSnapIntegration) - inspiration for button daemon
 - [OCRmyPDF](https://ocrmypdf.readthedocs.io/) - excellent OCR tool
+
+## Troubleshooting
+
+### Tesseract language data not found (local mode)
+Brew doesn't always link traineddata files automatically:
+```bash
+TESS_VERSION=$(brew list --versions tesseract | awk '{print $2}')
+ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/eng.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
+ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/osd.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
+```
 
 ## License
 
