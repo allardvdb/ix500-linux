@@ -94,7 +94,27 @@ install:
 
     # --- Scanner detection ---
     echo "Detecting scanner..."
-    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1 || true)
+    SCAN_LIST=$(scanimage -L 2>/dev/null || true)
+    USB_DEVICE=$(echo "$SCAN_LIST" | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1 || true)
+    WIFI_DEVICE=$(echo "$SCAN_LIST" | grep -oP "escl:[^ '\"]*" | head -1 || true)
+
+    if [ -n "$USB_DEVICE" ] && [ -n "$WIFI_DEVICE" ]; then
+        ok "Found USB:  $USB_DEVICE"
+        ok "Found WiFi: $WIFI_DEVICE"
+        echo "  1) USB  — $USB_DEVICE (recommended)"
+        echo "  2) WiFi — $WIFI_DEVICE (experimental: button polling not yet supported)"
+        read -rp "  Choice [1/2]: " DEV_CHOICE
+        if [ "$DEV_CHOICE" = "2" ]; then
+            DETECTED_DEVICE="$WIFI_DEVICE"
+        else
+            DETECTED_DEVICE="$USB_DEVICE"
+        fi
+    elif [ -n "$USB_DEVICE" ]; then
+        DETECTED_DEVICE="$USB_DEVICE"
+    elif [ -n "$WIFI_DEVICE" ]; then
+        DETECTED_DEVICE="$WIFI_DEVICE"
+        warn "WiFi only — button polling not yet supported over WiFi"
+    fi
 
     if [ -n "$DETECTED_DEVICE" ]; then
         ok "Found: $DETECTED_DEVICE"
@@ -325,6 +345,17 @@ check:
     fi
 
     echo
+    echo "WiFi scanning:"
+    check_cmd avahi-browse
+    if [ -f /etc/sane.d/airscan.conf ] || [ -f /etc/sane.d/dll.d/airscan ]; then
+        ok "sane-airscan backend installed"
+    else
+        fail "sane-airscan backend not found"
+        ALL_OK=false
+    fi
+    check_cmd socat
+
+    echo
     if [ "$ALL_OK" = true ]; then
         echo "All dependencies found."
     else
@@ -380,3 +411,102 @@ uninstall:
 
     echo
     echo "Uninstalled. Config file ~/.config/environment.d/scanner.conf was kept (delete manually if desired)."
+
+# --- WiFi probe/capture recipes ---
+
+# Run all parameter-free network probes
+probe: probe-discover
+
+# Discover scanner on the network via mDNS and SANE
+probe-discover:
+    #!/usr/bin/env bash
+    set -e
+    echo "=== mDNS service discovery ==="
+    echo
+    echo "Looking for eSCL (AirScan) services..."
+    avahi-browse -t -r _uscan._tcp 2>/dev/null || echo "(no eSCL services found)"
+    echo
+    echo "Looking for WSD services..."
+    avahi-browse -t -r _scanner._tcp 2>/dev/null || echo "(no WSD scanner services found)"
+    echo
+    echo "=== SANE device list ==="
+    echo
+    scanimage -L 2>/dev/null || echo "(no SANE devices found)"
+
+# Query eSCL endpoints on the scanner
+probe-escl ip="":
+    #!/usr/bin/env bash
+    set -e
+    IP="{{ip}}"
+    if [ -z "$IP" ]; then
+        echo "Usage: just probe-escl <scanner-ip>"
+        echo "  e.g. just probe-escl 192.168.1.42"
+        exit 1
+    fi
+    echo "=== eSCL Scanner Capabilities ==="
+    echo
+    curl -sf "http://$IP:8080/eSCL/ScannerCapabilities" 2>/dev/null \
+        || curl -sf "http://$IP:443/eSCL/ScannerCapabilities" 2>/dev/null \
+        || echo "(no response — try a different port?)"
+    echo
+    echo "=== eSCL Scanner Status ==="
+    echo
+    curl -sf "http://$IP:8080/eSCL/ScannerStatus" 2>/dev/null \
+        || curl -sf "http://$IP:443/eSCL/ScannerStatus" 2>/dev/null \
+        || echo "(no response)"
+
+# Show scanimage options for a device
+probe-options device="":
+    #!/usr/bin/env bash
+    set -e
+    DEV="{{device}}"
+    if [ -z "$DEV" ]; then
+        echo "Usage: just probe-options <device-string>"
+        echo "  e.g. just probe-options 'escl:http://192.168.1.42:8080'"
+        exit 1
+    fi
+    echo "=== scanimage options for $DEV ==="
+    echo
+    scanimage --device "$DEV" -A 2>/dev/null || echo "(failed to query device)"
+
+# Test known iX500 WiFi ports
+probe-ports ip="":
+    #!/usr/bin/env bash
+    set -e
+    IP="{{ip}}"
+    if [ -z "$IP" ]; then
+        echo "Usage: just probe-ports <scanner-ip>"
+        echo "  e.g. just probe-ports 192.168.1.42"
+        exit 1
+    fi
+    echo "=== Port scan: $IP ==="
+    echo
+    declare -A PORTS=(
+        [55265]="button notification (proprietary)"
+        [52217]="retrieval (proprietary)"
+        [53220]="startup notice (proprietary)"
+        [5357]="WSD"
+        [8080]="eSCL (HTTP)"
+        [443]="eSCL (HTTPS)"
+    )
+    for port in 55265 52217 53220 5357 8080 443; do
+        desc="${PORTS[$port]}"
+        if timeout 2 bash -c "echo >/dev/tcp/$IP/$port" 2>/dev/null; then
+            echo "  ✓ $port ($desc) — open"
+        else
+            echo "  ✗ $port ($desc) — closed/filtered"
+        fi
+    done
+
+# Listen for button press notifications from the scanner (port 55265)
+listen:
+    #!/usr/bin/env bash
+    set -e
+    PORT=55265
+    CAPTURE_FILE="capture-$(date '+%Y%m%d-%H%M%S').bin"
+    echo "Listening on port $PORT for scanner button notifications..."
+    echo "Press the scan button on the iX500 (connected via WiFi)."
+    echo "Raw data will be saved to $CAPTURE_FILE"
+    echo "Press Ctrl+C to stop."
+    echo
+    socat -x TCP-LISTEN:$PORT,reuseaddr,fork STDOUT 2>&1 | tee "$CAPTURE_FILE"
