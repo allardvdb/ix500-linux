@@ -2,7 +2,7 @@
 # scan-button-poll - Poll ScanSnap ix500 button and trigger scan
 # Designed to be started/stopped by udev on USB connect/disconnect
 
-POLL_INTERVAL=0.5
+POLL_INTERVAL=0.1
 DEBOUNCE=3
 
 # Path to scan script (adjust if installed elsewhere)
@@ -40,14 +40,34 @@ while true; do
     if [ "$button_state" = "yes" ]; then
         log "Button pressed! Starting scan..."
 
-        # Run the scan script
-        if "$SCAN_SCRIPT"; then
+        # Run the scan script, capture output
+        SCAN_OUTPUT=$("$SCAN_SCRIPT" 2>&1) && SCAN_OK=true || SCAN_OK=false
+        echo "$SCAN_OUTPUT"
+
+        if [ "$SCAN_OK" = true ]; then
             log "Scan completed successfully"
-            # Send desktop notification
-            notify-send -i scanner "Scan Complete" "Document saved to scanner-inbox" 2>/dev/null || true
+            # Send clickable desktop notification (in background to not block polling)
+            if [ -n "$PAPERLESS_URL" ]; then
+                (
+                    ACTION=$(notify-send -i scanner --action="open=Open in Paperless" \
+                        "Scan Complete" "Document uploaded to Paperless" 2>/dev/null)
+                    [ "$ACTION" = "open" ] && xdg-open "$PAPERLESS_URL" 2>/dev/null
+                ) &
+            else
+                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
+                (
+                    ACTION=$(notify-send -i scanner --action="open=Open" \
+                        "Scan Complete" "Document saved to scanner-inbox" 2>/dev/null)
+                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
+                ) &
+            fi
         else
             log "Scan failed"
-            notify-send -u critical -i dialog-error "Scan Failed" "Check scanner and try again" 2>/dev/null || true
+            (
+                ACTION=$(notify-send -u critical -i dialog-error --action="logs=View Logs" \
+                    "Scan Failed" "Something went wrong during scanning" 2>/dev/null)
+                [ "$ACTION" = "logs" ] && xdg-terminal-exec journalctl --user -u scan-button.service -n 50 --no-pager 2>/dev/null
+            ) &
         fi
 
         # Debounce - wait before polling again to let button release

@@ -1,6 +1,11 @@
 #!/bin/bash
-# scan - Quick scan from ScanSnap ix500 with OCR
-# Output: ~/Documents/scanner-inbox/scan-YYYY-MM-DD-HHMMSS.pdf
+# scan - Quick scan from ScanSnap ix500
+#
+# Two modes:
+#   Paperless mode: If PAPERLESS_URL and PAPERLESS_TOKEN are set,
+#                   uploads PDF to Paperless-ngx (which handles OCR).
+#   Local mode:     Otherwise, runs OCR locally and saves to
+#                   ~/Documents/scanner-inbox/
 #
 # Features:
 # - A4 page size
@@ -8,8 +13,6 @@
 # - Color scan with auto-grayscale conversion
 # - Auto-skip blank pages (back sides)
 # - Multi-page batch to single PDF
-# - OCR with Dutch primary, English secondary
-# - Aggressive compression
 
 set -e
 
@@ -20,18 +23,16 @@ if [ -z "$DEVICE" ]; then
     exit 1
 fi
 
-OUTDIR="$HOME/Documents/scanner-inbox"
+# Determine mode
+if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
+    MODE=paperless
+else
+    MODE=local
+fi
+
 TIMESTAMP=$(date '+%Y-%m-%d-%H%M%S')
 TMPDIR=$(mktemp -d)
-OUTFILE="$OUTDIR/scan-$TIMESTAMP.pdf"
-
-# Ensure output directory exists
-mkdir -p "$OUTDIR"
-
-# Optional: custom filename as argument
-if [ -n "$1" ]; then
-    OUTFILE="$OUTDIR/$1.pdf"
-fi
+FILENAME="${1:-scan-$TIMESTAMP}"
 
 cleanup() {
     rm -rf "$TMPDIR"
@@ -89,22 +90,44 @@ else
     echo "Color detected"
 fi
 
-echo "Running OCR..."
+if [ "$MODE" = "paperless" ]; then
+    echo "Creating PDF..."
+    magick "$TMPDIR"/page-*.tiff "$TMPDIR/$FILENAME.pdf"
 
-# Combine TIFFs into single TIFF, then OCR
-# ocrmypdf only accepts one input file for multi-page
-magick "$TMPDIR"/page-*.tiff "$TMPDIR/combined.tiff"
+    echo "Uploading to Paperless..."
+    RESPONSE=$(curl -sk -w "\n%{http_code}" \
+        -H "Authorization: Token $PAPERLESS_TOKEN" \
+        -F "document=@$TMPDIR/$FILENAME.pdf" \
+        -F "created=$(date '+%Y-%m-%d')" \
+        "$PAPERLESS_URL/api/documents/post_document/")
 
-ocrmypdf "$TMPDIR/combined.tiff" "$OUTFILE" \
-    -l nld+eng \
-    --rotate-pages \
-    --rotate-pages-threshold 2 \
-    --deskew \
-    --clean \
-    -O 3 \
-    --jpeg-quality 60 \
-    --jbig2-lossy
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    if [ "$HTTP_CODE" -eq 200 ]; then
+        FILESIZE=$(ls -lh "$TMPDIR/$FILENAME.pdf" | awk '{print $5}')
+        echo "Done: $FILENAME.pdf ($PAGECOUNT pages, $FILESIZE) uploaded to Paperless"
+    else
+        echo "Upload failed (HTTP $HTTP_CODE)"
+        BODY=$(echo "$RESPONSE" | sed '$d')
+        [ -n "$BODY" ] && echo "$BODY"
+        exit 1
+    fi
+else
+    OUTDIR="$HOME/Documents/scanner-inbox"
+    OUTFILE="$OUTDIR/$FILENAME.pdf"
+    mkdir -p "$OUTDIR"
 
-# Show final file size
-FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
-echo "Done: $OUTFILE ($PAGECOUNT pages, $FILESIZE)"
+    echo "Running OCR..."
+    magick "$TMPDIR"/page-*.tiff "$TMPDIR/combined.tiff"
+    ocrmypdf "$TMPDIR/combined.tiff" "$OUTFILE" \
+        -l nld+eng \
+        --rotate-pages \
+        --rotate-pages-threshold 2 \
+        --deskew \
+        --clean \
+        -O 3 \
+        --jpeg-quality 60 \
+        --jbig2-lossy
+
+    FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
+    echo "Done: $OUTFILE ($PAGECOUNT pages, $FILESIZE)"
+fi
