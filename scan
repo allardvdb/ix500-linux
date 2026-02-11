@@ -1,23 +1,29 @@
 #!/bin/bash
 # scan - Quick scan from ScanSnap ix500
 #
-# Two modes:
-#   Paperless mode: If PAPERLESS_URL and PAPERLESS_TOKEN are set,
-#                   uploads PDF to Paperless-ngx (which handles OCR).
-#   Local mode:     Otherwise, runs OCR locally and saves to
-#                   ~/Documents/scanner-inbox/
+# Three modes (determined by environment variables):
+#   Paperless API mode:    PAPERLESS_URL and PAPERLESS_TOKEN set
+#                          → uploads PDF to Paperless-ngx via API
+#   Paperless folder mode: PAPERLESS_CONSUME_DIR set
+#                          → writes PDF directly to consume folder
+#   Local mode:            none of the above set
+#                          → runs OCR locally, saves to ~/Documents/scanner-inbox/
 #
 # Features:
-# - A4 page size
+# - A4 page size with bleed margin for edge-to-edge capture
 # - Duplex (both sides)
-# - Color scan with auto-grayscale conversion
+# - Color scan with optional auto-grayscale conversion (COLOR_DETECT)
 # - Auto-skip blank pages (back sides)
 # - Multi-page batch to single PDF
 
 set -e
 
-# Auto-detect scanner device
-DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+# Scanner device — from env or auto-detect
+if [ -n "$SCANNER_DEVICE" ]; then
+    DEVICE="$SCANNER_DEVICE"
+else
+    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+fi
 if [ -z "$DEVICE" ]; then
     echo "Error: ScanSnap iX500 not found. Is it connected and powered on?"
     exit 1
@@ -25,10 +31,17 @@ fi
 
 # Determine mode
 if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
-    MODE=paperless
+    MODE=paperless-api
+elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
+    MODE=paperless-folder
 else
     MODE=local
 fi
+
+# Bleed margin for edge-to-edge capture (avoids cut-off edges)
+BLEED_MM=10
+PAGE_WIDTH_MM=$((210 + BLEED_MM))
+PAGE_HEIGHT_MM=$((297 + BLEED_MM))
 
 TIMESTAMP=$(date '+%Y-%m-%d-%H%M%S')
 WORKDIR=$(mktemp -d)
@@ -45,8 +58,8 @@ scanimage --device "$DEVICE" \
     --resolution 300 \
     --mode Color \
     --source "ADF Duplex" \
-    --page-width 210 \
-    --page-height 297 \
+    --page-width "$PAGE_WIDTH_MM" \
+    --page-height "$PAGE_HEIGHT_MM" \
     --swskip 20 \
     --swcrop=yes \
     --swdespeck 2 \
@@ -65,32 +78,40 @@ if [ "$PAGECOUNT" -eq 0 ]; then
     exit 1
 fi
 
-echo "Scanned $PAGECOUNT page(s), detecting color..."
+echo "Scanned $PAGECOUNT page(s)"
 
-# Auto-detect color vs grayscale for each page (reduces file size for upload too)
-# Convert to grayscale if saturation is low (no significant color)
-COLOR_PAGES=0
-GRAY_PAGES=0
-for tiff in "$WORKDIR"/page-*.tiff; do
-    # Check color saturation - if mean saturation < 10%, convert to grayscale
-    saturation=$(magick "$tiff" -colorspace HSL -channel G -separate +channel -format "%[fx:mean*100]" info: 2>/dev/null || echo "0")
-    if (( $(echo "$saturation < 10" | bc -l) )); then
-        magick "$tiff" -colorspace Gray "$tiff"
-        GRAY_PAGES=$((GRAY_PAGES + 1))
+# Auto-detect color vs grayscale for each page (reduces file size)
+# Can be disabled with COLOR_DETECT=false
+if [ "${COLOR_DETECT:-true}" = "true" ]; then
+    echo "Detecting color..."
+    COLOR_PAGES=0
+    GRAY_PAGES=0
+    for tiff in "$WORKDIR"/page-*.tiff; do
+        # Check color saturation - if mean saturation < 10%, convert to grayscale
+        saturation=$(magick "$tiff" -colorspace HSL -channel G -separate +channel -format "%[fx:mean*100]" info: 2>/dev/null || echo "0")
+        if (( $(echo "$saturation < 10" | bc -l) )); then
+            magick "$tiff" -colorspace Gray "$tiff"
+            GRAY_PAGES=$((GRAY_PAGES + 1))
+        else
+            COLOR_PAGES=$((COLOR_PAGES + 1))
+        fi
+    done
+
+    if [ "$GRAY_PAGES" -gt 0 ] && [ "$COLOR_PAGES" -gt 0 ]; then
+        echo "Mixed: $COLOR_PAGES color, $GRAY_PAGES grayscale"
+    elif [ "$GRAY_PAGES" -gt 0 ]; then
+        echo "Converted to grayscale"
     else
-        COLOR_PAGES=$((COLOR_PAGES + 1))
+        echo "Color detected"
     fi
-done
-
-if [ "$GRAY_PAGES" -gt 0 ] && [ "$COLOR_PAGES" -gt 0 ]; then
-    echo "Mixed: $COLOR_PAGES color, $GRAY_PAGES grayscale"
-elif [ "$GRAY_PAGES" -gt 0 ]; then
-    echo "Converted to grayscale"
 else
-    echo "Color detected"
+    echo "Color detection disabled, converting to grayscale..."
+    for tiff in "$WORKDIR"/page-*.tiff; do
+        magick "$tiff" -colorspace Gray "$tiff"
+    done
 fi
 
-if [ "$MODE" = "paperless" ]; then
+if [ "$MODE" = "paperless-api" ]; then
     echo "Creating PDF..."
     magick "$WORKDIR"/page-*.tiff "$WORKDIR/$FILENAME.pdf"
 
@@ -111,6 +132,16 @@ if [ "$MODE" = "paperless" ]; then
         [ -n "$BODY" ] && echo "$BODY"
         exit 1
     fi
+
+elif [ "$MODE" = "paperless-folder" ]; then
+    OUTFILE="$PAPERLESS_CONSUME_DIR/$FILENAME.pdf"
+
+    echo "Creating PDF..."
+    magick "$WORKDIR"/page-*.tiff "$OUTFILE"
+
+    FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
+    echo "Done: $OUTFILE ($PAGECOUNT pages, $FILESIZE)"
+
 else
     OUTDIR="$HOME/Documents/scanner-inbox"
     OUTFILE="$OUTDIR/$FILENAME.pdf"

@@ -5,14 +5,15 @@
 POLL_INTERVAL=0.1
 DEBOUNCE=3
 
-# Path to scan script (adjust if installed elsewhere)
-SCAN_SCRIPT="$HOME/.local/bin/scan"
+# Resolve scan script relative to this script's location
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCAN_SCRIPT="$SCRIPT_DIR/scan"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
 }
 
-# Auto-detect scanner device
+# Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
 detect_device() {
     scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1
 }
@@ -22,7 +23,12 @@ get_button_state() {
     scanimage --device "$DEVICE" -A 2>/dev/null | grep -oP '(?<=--scan\[=\(yes\|no\)\] \[)\w+' || echo "error"
 }
 
-DEVICE=$(detect_device)
+# Scanner device — from env or auto-detect
+if [ -n "$SCANNER_DEVICE" ]; then
+    DEVICE="$SCANNER_DEVICE"
+else
+    DEVICE=$(detect_device)
+fi
 if [ -z "$DEVICE" ]; then
     log "Error: ScanSnap iX500 not found"
     exit 1
@@ -52,6 +58,13 @@ while true; do
                     ACTION=$(notify-send -i scanner --action="open=Open in Paperless" \
                         "Scan Complete" "Document uploaded to Paperless" 2>/dev/null)
                     [ "$ACTION" = "open" ] && xdg-open "$PAPERLESS_URL" 2>/dev/null
+                ) &
+            elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
+                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
+                (
+                    ACTION=$(notify-send -i scanner --action="open=Open" \
+                        "Scan Complete" "Document saved to consume folder" 2>/dev/null)
+                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
                 ) &
             else
                 OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
