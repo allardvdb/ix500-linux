@@ -13,9 +13,12 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1"
 }
 
-# Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
+# Auto-detect scanner device: try USB (fujitsu) first, then WiFi (eSCL)
 detect_device() {
-    scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1
+    local dev
+    dev=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+    [ -z "$dev" ] && dev=$(scanimage -L 2>/dev/null | grep -oP "escl:[^ '\"]*" | head -1)
+    echo "$dev"
 }
 
 get_button_state() {
@@ -34,7 +37,25 @@ if [ -z "$DEVICE" ]; then
     exit 1
 fi
 
-log "Starting button poll for $DEVICE"
+# Determine backend from device string
+case "$DEVICE" in
+    fujitsu:*) BACKEND=fujitsu ;;
+    escl:*)    BACKEND=escl ;;
+    *)         BACKEND=fujitsu ;;
+esac
+
+log "Starting button poll for $DEVICE ($BACKEND backend)"
+
+# WiFi (eSCL) button polling is not yet supported — the iX500 uses a proprietary
+# TCP notification on port 55265 that hasn't been reverse-engineered yet.
+# Keep the service alive so it doesn't restart-thrash.
+if [ "$BACKEND" = "escl" ]; then
+    log "WiFi button polling not yet supported (see: just listen)"
+    log "Idle — waiting for future protocol implementation"
+    while true; do
+        sleep 60
+    done
+fi
 
 # Wait for scanner to be ready
 sleep 2

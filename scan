@@ -18,16 +18,31 @@
 
 set -e
 
+# Auto-detect scanner device: try USB (fujitsu) first, then WiFi (eSCL)
+detect_device() {
+    local dev
+    dev=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+    [ -z "$dev" ] && dev=$(scanimage -L 2>/dev/null | grep -oP "escl:[^ '\"]*" | head -1)
+    echo "$dev"
+}
+
 # Scanner device — from env or auto-detect
 if [ -n "$SCANNER_DEVICE" ]; then
     DEVICE="$SCANNER_DEVICE"
 else
-    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+    DEVICE=$(detect_device)
 fi
 if [ -z "$DEVICE" ]; then
     echo "Error: ScanSnap iX500 not found. Is it connected and powered on?"
     exit 1
 fi
+
+# Determine backend from device string
+case "$DEVICE" in
+    fujitsu:*) BACKEND=fujitsu ;;
+    escl:*)    BACKEND=escl ;;
+    *)         BACKEND=fujitsu ;;
+esac
 
 # Determine mode
 if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
@@ -52,23 +67,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Scanning (duplex, color, A4)..."
-scanimage --device "$DEVICE" \
-    --format=tiff \
-    --resolution 300 \
-    --mode Color \
-    --source "ADF Duplex" \
-    --page-width "$PAGE_WIDTH_MM" \
-    --page-height "$PAGE_HEIGHT_MM" \
-    --swskip 20 \
-    --swcrop=yes \
-    --swdespeck 2 \
-    --overscan On \
-    --prepick On \
-    --buffermode On \
-    --batch="$WORKDIR/page-%04d.tiff" \
-    --batch-count=-1 \
-    2>&1 | grep -v "^$" || true
+echo "Scanning (duplex, color, A4) via $BACKEND backend..."
+if [ "$BACKEND" = "escl" ]; then
+    scanimage --device "$DEVICE" \
+        --format=tiff \
+        --resolution 300 \
+        --mode Color \
+        --source "ADF Duplex" \
+        --batch="$WORKDIR/page-%04d.tiff" \
+        --batch-count=-1 \
+        2>&1 | grep -v "^$" || true
+else
+    scanimage --device "$DEVICE" \
+        --format=tiff \
+        --resolution 300 \
+        --mode Color \
+        --source "ADF Duplex" \
+        --page-width "$PAGE_WIDTH_MM" \
+        --page-height "$PAGE_HEIGHT_MM" \
+        --swskip 20 \
+        --swcrop=yes \
+        --swdespeck 2 \
+        --overscan On \
+        --prepick On \
+        --buffermode On \
+        --batch="$WORKDIR/page-%04d.tiff" \
+        --batch-count=-1 \
+        2>&1 | grep -v "^$" || true
+fi
 
 # Count scanned pages
 PAGECOUNT=$(ls -1 "$WORKDIR"/page-*.tiff 2>/dev/null | wc -l)
