@@ -10,83 +10,43 @@ Press the scanner button → get a PDF. That's it.
 - **Duplex A4 color** - scans both sides automatically
 - **Smart blank detection** - skips empty back pages (20% threshold)
 - **Auto color/grayscale** - converts B&W pages to grayscale for smaller files
-- **Two output modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) or save locally with OCR
+- **Three output modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) via API, write to a Paperless consume folder, or save locally with OCR
 - **Clickable notifications** - open the result directly from the notification
 - **Robust disconnect handling** - no crashes when scanner is unplugged
 
-### Paperless-ngx mode (recommended)
+### Paperless-ngx API mode (recommended)
 When `PAPERLESS_URL` and `PAPERLESS_TOKEN` are set, scans are uploaded directly to Paperless-ngx via its API. Paperless handles OCR, archiving, compression, and search.
+
+### Paperless-ngx folder mode
+When `PAPERLESS_CONSUME_DIR` is set, scans are written directly to the Paperless consume folder. Paperless picks them up from there.
 
 ### Local mode
 Without Paperless configured, scans are processed locally with ocrmypdf (Dutch + English OCR, auto-rotate, deskew, cleanup) and saved to `~/Documents/scanner-inbox/`.
 
 ## Requirements
 
-### System packages
-- `sane` / `sane-backends` - scanner driver (usually pre-installed)
+- **just** - task runner
+- **sane-backends** (`scanimage`) - scanner driver
+- **ImageMagick** (`magick`) - image processing and PDF creation
+- **bc** - floating point math for color detection
+- **libnotify** (`notify-send`), **xdg-utils** (`xdg-open`), **xdg-terminal-exec** - desktop notifications
 
-### Homebrew packages
+Local mode only:
+- **ocrmypdf** - OCR and PDF creation
+- **tesseract** with `nld` and `eng` language data
 
-For both modes:
-```bash
-brew install imagemagick
-```
+Paperless API mode only:
+- **curl** - API upload
 
-For local mode (OCR):
-```bash
-brew install ocrmypdf tesseract tesseract-lang
-```
+Run `just check` to see which dependencies are installed.
 
 ## Installation
 
-### Quick install
 ```bash
-./install
+just install
 ```
 
-The interactive installer checks dependencies, asks for Paperless or local mode, configures credentials, and activates the service.
-
-### Manual installation
-
-#### 1. Verify scanner is detected
-```bash
-scanimage -L
-# Should show: device `fujitsu:ScanSnap iX500:XXXXX'
-```
-
-#### 2. Install scripts
-```bash
-cp scan scan-button-poll ~/.local/bin/
-chmod +x ~/.local/bin/scan ~/.local/bin/scan-button-poll
-```
-
-#### 3. Configure Paperless (optional)
-```bash
-mkdir -p ~/.config/environment.d
-cat > ~/.config/environment.d/paperless.conf <<EOF
-PAPERLESS_URL=https://paperless.example.com
-PAPERLESS_TOKEN=your-api-token
-EOF
-```
-
-#### 4. Install systemd user service
-```bash
-cp scan-button.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable scan-button.service
-```
-
-#### 5. Install udev rule (for auto start on USB connect)
-```bash
-sudo cp 99-scansnap-ix500.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-#### 6. Start the service
-```bash
-systemctl --user start scan-button.service
-```
+The interactive installer detects the scanner, asks for mode and preferences, configures settings, installs files, and activates the service.
 
 ## Usage
 
@@ -102,13 +62,25 @@ scan                  # Auto-named: scan-YYYY-MM-DD-HHMMSS.pdf
 scan my-document      # Custom name: my-document.pdf
 ```
 
-### Check service status
+### Service management
 ```bash
-systemctl --user status scan-button.service
-journalctl --user -u scan-button.service -f
+just status    # Show service status
+just logs      # Follow service logs
+just restart   # Restart the service
+just uninstall # Remove everything
 ```
 
 ## Configuration
+
+Settings are stored in `~/.config/environment.d/scanner.conf` (managed by `just install`):
+
+| Variable | Description |
+|---|---|
+| `SCANNER_DEVICE` | SANE device string (auto-detected if unset) |
+| `COLOR_DETECT` | `true` (default) or `false` — auto-detect color vs grayscale per page |
+| `PAPERLESS_URL` | Paperless-ngx base URL (API mode) |
+| `PAPERLESS_TOKEN` | Paperless-ngx API token (API mode) |
+| `PAPERLESS_CONSUME_DIR` | Path to Paperless consume folder (folder mode) |
 
 ### Scanner options (in `scan`)
 
@@ -145,15 +117,15 @@ Pages with <10% color saturation are converted to grayscale automatically.
                     ┌─────────────────────────────┘
                     ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  scanimage  │────▶│ ImageMagick  │────▶│ Paperless-ngx   │
-│  (SANE)     │     │ (PDF)        │     │ or ocrmypdf     │
+│  scanimage  │────▶│ ImageMagick  │────▶│ Paperless API / │
+│  (SANE)     │     │ (PDF)        │     │ folder / OCR    │
 └─────────────┘     └──────────────┘     └─────────────────┘
 ```
 
 1. **Button poll service** checks scanner button every 100ms
 2. **scanimage** captures duplex color TIFF pages
 3. **ImageMagick** combines pages, detects color vs grayscale, creates PDF
-4. **Paperless-ngx** receives the upload (or **ocrmypdf** processes locally)
+4. Delivery: **Paperless API** upload, **Paperless folder** write, or local **ocrmypdf**
 5. **Clickable notification** confirms completion
 
 ## Tested on
@@ -169,16 +141,6 @@ Should work on any Linux with SANE support for the iX500.
 - [Rida Ayed's ix500 Linux guide](https://ridaayed.com/posts/setup_fujitsu_ix500_scanner_linux/) - scanner options and swskip threshold
 - [foxey/scanbdScanSnapIntegration](https://github.com/foxey/scanbdScanSnapIntegration) - inspiration for button daemon
 - [OCRmyPDF](https://ocrmypdf.readthedocs.io/) - excellent OCR tool
-
-## Troubleshooting
-
-### Tesseract language data not found (local mode)
-Brew doesn't always link traineddata files automatically:
-```bash
-TESS_VERSION=$(brew list --versions tesseract | awk '{print $2}')
-ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/eng.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
-ln -sf "/home/linuxbrew/.linuxbrew/Cellar/tesseract/${TESS_VERSION}/share/tessdata/osd.traineddata" /home/linuxbrew/.linuxbrew/share/tessdata/
-```
 
 ## License
 
