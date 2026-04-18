@@ -1,5 +1,5 @@
 [Unit]
-Description=ScanSnap ix500 Button Polling Service
+Description=ScanSnap Button Polling Service
 
 [Service]
 Type=simple

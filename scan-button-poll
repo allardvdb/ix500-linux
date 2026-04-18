@@ -1,6 +1,7 @@
 #!/bin/bash
-# scan-button-poll - Poll ScanSnap ix500 button and trigger scan
-# Designed to be started/stopped by udev on USB connect/disconnect
+# scan-button-poll - Poll ScanSnap button and trigger scan
+# Designed to be started/stopped by udev on USB connect/disconnect.
+# Works with any ScanSnap model supported by the SANE fujitsu backend.
 
 POLL_INTERVAL=0.1
 DEBOUNCE=3
@@ -10,12 +11,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCAN_SCRIPT="$SCRIPT_DIR/scan"
 
 log() {
-    echo "[$(date '+%H:%M:%S')] $1"
+    # Journald adds its own timestamp; no point duplicating it here.
+    echo "$1"
 }
 
-# Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
+# Auto-detect scanner device (fallback when SCANNER_DEVICE is not set).
+# Matches any ScanSnap model, e.g. `fujitsu:ScanSnap iX500:262571`,
+# `fujitsu:ScanSnap S1500:262571`.
 detect_device() {
-    scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1
+    scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap [^:]+:\d+" | head -1
 }
 
 get_button_state() {
@@ -30,7 +34,7 @@ else
     DEVICE=$(detect_device)
 fi
 if [ -z "$DEVICE" ]; then
-    log "Error: ScanSnap iX500 not found"
+    log "Error: No ScanSnap found"
     exit 1
 fi
 
@@ -46,40 +50,74 @@ while true; do
     if [ "$button_state" = "yes" ]; then
         log "Button pressed! Starting scan..."
 
-        # Run the scan script, capture output
-        SCAN_OUTPUT=$("$SCAN_SCRIPT" 2>&1) && SCAN_OK=true || SCAN_OK=false
-        echo "$SCAN_OUTPUT"
+        # Send the initial popup WITHOUT -r (so it actually pops up) and
+        # capture the server-assigned ID via --print-id. -t 0 keeps the
+        # popup alive for the whole scan so stage updates from `scan` can
+        # replace it visibly (a -r against an expired popup lands silently
+        # in notification history). `scan` inherits NOTIFY_ID via env.
+        NOTIFY_ID=$(notify-send --print-id -t 0 -i scanner \
+            "Scanning" "Starting scan…" 2>/dev/null) || NOTIFY_ID=""
+        export NOTIFY_ID
+
+        # Stream scan output through tee so the journal sees each line as it
+        # happens — otherwise `SCAN_OUTPUT=$(...)` captures the whole run
+        # into memory and the journal gets everything in one burst at the
+        # end (with identical timestamps).
+        SCAN_LOG=$(mktemp)
+        "$SCAN_SCRIPT" 2>&1 | tee "$SCAN_LOG"
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+            SCAN_OK=true
+        else
+            SCAN_OK=false
+        fi
+        SCAN_OUTPUT=$(cat "$SCAN_LOG")
+        rm -f "$SCAN_LOG"
+
+        # Pick up NOTIFY_ID if scan captured one itself (manual run) or updated
+        # it during the pipeline. `export` is a no-op for bash builtins we already
+        # `export`ed, but the value is what matters — scan's notify_progress
+        # assigns NOTIFY_ID in its own process so we can't see changes; rely on
+        # our own captured ID above. If it's empty (notify-send missing/failed),
+        # the helper falls back to sending without -r.
+        replace_args=()
+        [ -n "$NOTIFY_ID" ] && replace_args=(-r "$NOTIFY_ID")
 
         if [ "$SCAN_OK" = true ]; then
             log "Scan completed successfully"
-            # Send clickable desktop notification (in background to not block polling)
+            # `scan` logs `Done: <path-or-filename> (<pages> pages, <size>)`; pull
+            # that out so the notification can show what was actually produced.
+            DONE_TARGET=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
+            DONE_NAME=$(basename "$DONE_TARGET")
+            # Send clickable desktop notification (in background to not block polling).
             if [ -n "$PAPERLESS_URL" ]; then
                 (
-                    ACTION=$(notify-send -i scanner --action="open=Open in Paperless" \
-                        "Scan Complete" "Document uploaded to Paperless" 2>/dev/null)
+                    ACTION=$(notify-send "${replace_args[@]}" -i scanner --action="open=Open in Paperless" \
+                        "Scan Complete" "Uploaded $DONE_NAME to Paperless" 2>/dev/null)
                     [ "$ACTION" = "open" ] && xdg-open "$PAPERLESS_URL" 2>/dev/null
                 ) &
             elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
-                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
                 (
-                    ACTION=$(notify-send -i scanner --action="open=Open" \
-                        "Scan Complete" "Document saved to consume folder" 2>/dev/null)
-                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
+                    ACTION=$(notify-send "${replace_args[@]}" -i scanner --action="open=Open" \
+                        "Scan Complete" "Saved $DONE_NAME to consume folder" 2>/dev/null)
+                    [ "$ACTION" = "open" ] && xdg-open "$DONE_TARGET" 2>/dev/null
                 ) &
             else
-                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
                 (
-                    ACTION=$(notify-send -i scanner --action="open=Open" \
-                        "Scan Complete" "Document saved to scanner-inbox" 2>/dev/null)
-                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
+                    ACTION=$(notify-send "${replace_args[@]}" -i scanner --action="open=Open" \
+                        "Scan Complete" "Saved $DONE_NAME to scanner-inbox" 2>/dev/null)
+                    [ "$ACTION" = "open" ] && xdg-open "$DONE_TARGET" 2>/dev/null
                 ) &
             fi
         else
             log "Scan failed"
+            # Extract the most relevant error line from scan output for the notification.
+            ERROR_MSG=$(echo "$SCAN_OUTPUT" | grep -iE 'error|failed|no pages' | tail -1)
             (
-                ACTION=$(notify-send -u critical -i dialog-error --action="logs=View Logs" \
-                    "Scan Failed" "Something went wrong during scanning" 2>/dev/null)
-                [ "$ACTION" = "logs" ] && xdg-terminal-exec journalctl --user -u scan-button.service -n 50 --no-pager 2>/dev/null
+                ACTION=$(notify-send "${replace_args[@]}" -u critical -i dialog-error --action="logs=View Logs" \
+                    "Scan Failed" "${ERROR_MSG:-Something went wrong during scanning}" 2>/dev/null)
+                # Wrap in sh -c so the terminal stays open after the logs are shown
+                # (otherwise xdg-terminal-exec closes as soon as journalctl exits).
+                [ "$ACTION" = "logs" ] && xdg-terminal-exec sh -c 'journalctl --user -u scan-button.service -n 200 --no-pager; echo; read -rp "Press Enter to close..."' 2>/dev/null
             ) &
         fi
 

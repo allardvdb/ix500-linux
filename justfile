@@ -1,4 +1,4 @@
-# ix500-linux — one-button scanning for ScanSnap iX500
+# ix500-linux — one-button scanning for Fujitsu ScanSnap scanners
 
 # List available recipes
 default:
@@ -36,20 +36,88 @@ install:
     echo "====================="
     echo
 
-    # --- Mode selection ---
-    echo "Select scanning mode:"
-    echo "  1) Paperless-ngx API     - Upload scans to Paperless via API (recommended)"
-    echo "  2) Paperless-ngx folder  - Write scans to Paperless consume folder"
-    echo "  3) Local                  - OCR locally, save to ~/Documents/scanner-inbox/"
-    echo
-    read -rp "Choice [1/2/3]: " MODE_CHOICE
-    echo
+    # --- Load existing settings (if any) for use as defaults ---
+    ENV_DIR="$HOME/.config/environment.d"
+    ENV_FILE="$ENV_DIR/scanner.conf"
+    OLD_ENV_FILE="$ENV_DIR/paperless.conf"
 
-    case "$MODE_CHOICE" in
-        2) MODE=paperless-folder ;;
-        3) MODE=local ;;
-        *) MODE=paperless-api ;;
-    esac
+    read_var() {
+        local var=$1 file=$2
+        [ -f "$file" ] && grep -oP "(?<=^${var}=).+" "$file" 2>/dev/null || true
+    }
+
+    EXISTING_SCANNER_DEVICE=$(read_var SCANNER_DEVICE  "$ENV_FILE")
+    EXISTING_COLOR_DETECT=$(read_var COLOR_DETECT      "$ENV_FILE")
+    EXISTING_URL=$(read_var PAPERLESS_URL              "$ENV_FILE")
+    EXISTING_TOKEN=$(read_var PAPERLESS_TOKEN          "$ENV_FILE")
+    EXISTING_CONSUME_DIR=$(read_var PAPERLESS_CONSUME_DIR "$ENV_FILE")
+    # Migration: older installs stored Paperless creds in paperless.conf
+    if [ -f "$OLD_ENV_FILE" ]; then
+        [ -z "$EXISTING_URL" ]   && EXISTING_URL=$(read_var PAPERLESS_URL  "$OLD_ENV_FILE")
+        [ -z "$EXISTING_TOKEN" ] && EXISTING_TOKEN=$(read_var PAPERLESS_TOKEN "$OLD_ENV_FILE")
+    fi
+
+    # Derive existing mode from which vars are populated
+    EXISTING_MODE=""
+    if [ -n "$EXISTING_URL" ] && [ -n "$EXISTING_TOKEN" ]; then
+        EXISTING_MODE=paperless-api
+    elif [ -n "$EXISTING_CONSUME_DIR" ]; then
+        EXISTING_MODE=paperless-folder
+    elif [ -f "$ENV_FILE" ] || [ -f "$OLD_ENV_FILE" ]; then
+        EXISTING_MODE=local
+    fi
+
+    QUICK_INSTALL=false
+    if [ -n "$EXISTING_MODE" ]; then
+        ok "Existing installation detected ($ENV_FILE)"
+        case "$EXISTING_MODE" in
+            paperless-api)    echo "    mode:    Paperless-ngx API ($EXISTING_URL)" ;;
+            paperless-folder) echo "    mode:    Paperless-ngx folder ($EXISTING_CONSUME_DIR)" ;;
+            local)            echo "    mode:    Local OCR" ;;
+        esac
+        [ -n "$EXISTING_SCANNER_DEVICE" ] && echo "    scanner: $EXISTING_SCANNER_DEVICE"
+        [ -n "$EXISTING_COLOR_DETECT" ]   && echo "    color:   $EXISTING_COLOR_DETECT"
+        echo
+        read -rp "Keep current values? [Y/n]: " KEEP_CURRENT
+        echo
+        if [ "$KEEP_CURRENT" != "n" ] && [ "$KEEP_CURRENT" != "N" ]; then
+            QUICK_INSTALL=true
+            MODE="$EXISTING_MODE"
+            SCANNER_DEVICE="$EXISTING_SCANNER_DEVICE"
+            COLOR_DETECT="${EXISTING_COLOR_DETECT:-true}"
+            PAPERLESS_URL="$EXISTING_URL"
+            PAPERLESS_TOKEN="$EXISTING_TOKEN"
+            PAPERLESS_CONSUME_DIR="$EXISTING_CONSUME_DIR"
+        else
+            echo "Reconfiguring — press Enter at any prompt to keep the current value."
+            echo
+        fi
+    fi
+
+    # --- Mode selection ---
+    if [ "$QUICK_INSTALL" = "false" ]; then
+        echo "Select scanning mode:"
+        echo "  1) Paperless-ngx API     - Upload scans to Paperless via API (recommended)"
+        echo "  2) Paperless-ngx folder  - Write scans to Paperless consume folder"
+        echo "  3) Local                 - OCR locally, save to ~/Documents/scanner-inbox/"
+        echo
+
+        DEFAULT_MODE_NUM=1
+        case "$EXISTING_MODE" in
+            paperless-folder) DEFAULT_MODE_NUM=2 ;;
+            local)            DEFAULT_MODE_NUM=3 ;;
+        esac
+
+        read -rp "Choice [1/2/3] (default: $DEFAULT_MODE_NUM): " MODE_CHOICE
+        MODE_CHOICE="${MODE_CHOICE:-$DEFAULT_MODE_NUM}"
+        echo
+
+        case "$MODE_CHOICE" in
+            2) MODE=paperless-folder ;;
+            3) MODE=local ;;
+            *) MODE=paperless-api ;;
+        esac
+    fi
 
     # --- Dependency check ---
     echo "Checking dependencies..."
@@ -93,61 +161,110 @@ install:
     fi
 
     # --- Scanner detection ---
-    echo "Detecting scanner..."
-    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1 || true)
+    # Stop the polling service first — it holds a tight `scanimage -A` loop on
+    # the USB device, which makes `scanimage -L` return nothing. Service will
+    # be restarted at the end of install.
+    systemctl --user stop scan-button.service 2>/dev/null || true
 
-    if [ -n "$DETECTED_DEVICE" ]; then
-        ok "Found: $DETECTED_DEVICE"
-        read -rp "  Use this device? [Y/n]: " USE_DETECTED
-        if [ "$USE_DETECTED" = "n" ] || [ "$USE_DETECTED" = "N" ]; then
-            read -rp "  Device string: " SCANNER_DEVICE
-        else
-            SCANNER_DEVICE="$DETECTED_DEVICE"
+    if [ "$QUICK_INSTALL" = "false" ]; then
+        echo "Detecting scanner..."
+        mapfile -t DETECTED_DEVICES < <(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap [^:]+:\d+" || true)
+
+        SCANNER_DEVICE=""
+        # If the previously-saved device is still present, keep it silently.
+        if [ -n "$EXISTING_SCANNER_DEVICE" ]; then
+            for dev in "${DETECTED_DEVICES[@]}"; do
+                if [ "$dev" = "$EXISTING_SCANNER_DEVICE" ]; then
+                    SCANNER_DEVICE="$dev"
+                    ok "Using saved scanner: $SCANNER_DEVICE"
+                    break
+                fi
+            done
+            if [ -z "$SCANNER_DEVICE" ] && [ "${#DETECTED_DEVICES[@]}" -gt 0 ]; then
+                warn "Saved scanner ($EXISTING_SCANNER_DEVICE) not detected — re-prompting."
+            fi
         fi
-    else
-        warn "No scanner detected (is it connected?)"
-        read -rp "  Enter device string manually, or leave blank to auto-detect at scan time: " SCANNER_DEVICE
+
+        if [ -z "$SCANNER_DEVICE" ]; then
+            if [ "${#DETECTED_DEVICES[@]}" -eq 1 ]; then
+                ok "Found: ${DETECTED_DEVICES[0]}"
+                read -rp "  Use this device? [Y/n]: " USE_DETECTED
+                if [ "$USE_DETECTED" = "n" ] || [ "$USE_DETECTED" = "N" ]; then
+                    read -rp "  Device string: " SCANNER_DEVICE
+                else
+                    SCANNER_DEVICE="${DETECTED_DEVICES[0]}"
+                fi
+            elif [ "${#DETECTED_DEVICES[@]}" -gt 1 ]; then
+                ok "Found ${#DETECTED_DEVICES[@]} ScanSnap devices:"
+                DEFAULT_DEV_IDX=1
+                for i in "${!DETECTED_DEVICES[@]}"; do
+                    marker=""
+                    if [ "${DETECTED_DEVICES[$i]}" = "$EXISTING_SCANNER_DEVICE" ]; then
+                        marker=" (current)"
+                        DEFAULT_DEV_IDX=$((i + 1))
+                    fi
+                    echo "    $((i + 1))) ${DETECTED_DEVICES[$i]}$marker"
+                done
+                read -rp "  Choose device [1-${#DETECTED_DEVICES[@]}] (default: $DEFAULT_DEV_IDX): " CHOICE
+                CHOICE="${CHOICE:-$DEFAULT_DEV_IDX}"
+                IDX=$((CHOICE - 1))
+                if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "${#DETECTED_DEVICES[@]}" ]; then
+                    fail "Invalid choice"
+                    exit 1
+                fi
+                SCANNER_DEVICE="${DETECTED_DEVICES[$IDX]}"
+            else
+                warn "No ScanSnap detected"
+                # Distinguish between "USB not plugged in" and "USB visible but SANE can't talk to it"
+                if lsusb 2>/dev/null | grep -qi "ScanSnap\|04c5:"; then
+                    warn "USB device is present but SANE can't reach it."
+                    warn "The scanner may be wedged — try power-cycling it (unplug/replug USB),"
+                    warn "then re-run 'just install'."
+                else
+                    warn "Is it connected and powered on?"
+                fi
+                if [ -n "$EXISTING_SCANNER_DEVICE" ]; then
+                    read -rp "  Device string [$EXISTING_SCANNER_DEVICE]: " SCANNER_DEVICE
+                    SCANNER_DEVICE="${SCANNER_DEVICE:-$EXISTING_SCANNER_DEVICE}"
+                else
+                    read -rp "  Enter device string manually, or leave blank to auto-detect at scan time: " SCANNER_DEVICE
+                fi
+            fi
+        fi
+        echo
     fi
-    echo
 
     # --- Color detection preference ---
-    echo "Auto color detection converts grayscale pages to reduce file size."
-    read -rp "Enable auto color detection? [Y/n]: " COLOR_CHOICE
+    if [ "$QUICK_INSTALL" = "false" ]; then
+        echo "Auto color detection converts grayscale pages to reduce file size."
+        if [ "$EXISTING_COLOR_DETECT" = "false" ]; then
+            COLOR_PROMPT="y/N"
+            COLOR_DEFAULT=false
+        else
+            COLOR_PROMPT="Y/n"
+            COLOR_DEFAULT=true
+        fi
+        read -rp "Enable auto color detection? [$COLOR_PROMPT]: " COLOR_CHOICE
 
-    if [ "$COLOR_CHOICE" = "n" ] || [ "$COLOR_CHOICE" = "N" ]; then
-        COLOR_DETECT=false
-    else
-        COLOR_DETECT=true
-    fi
-    echo
-
-    # --- Load existing settings for defaults ---
-    ENV_DIR="$HOME/.config/environment.d"
-    ENV_FILE="$ENV_DIR/scanner.conf"
-    OLD_ENV_FILE="$ENV_DIR/paperless.conf"
-
-    EXISTING_URL=""
-    EXISTING_TOKEN=""
-    EXISTING_CONSUME_DIR=""
-
-    # Migrate from old paperless.conf if it exists
-    if [ -f "$OLD_ENV_FILE" ]; then
-        EXISTING_URL=$(grep -oP '(?<=^PAPERLESS_URL=).+' "$OLD_ENV_FILE" 2>/dev/null || true)
-        EXISTING_TOKEN=$(grep -oP '(?<=^PAPERLESS_TOKEN=).+' "$OLD_ENV_FILE" 2>/dev/null || true)
-    fi
-    # Also check existing scanner.conf
-    if [ -f "$ENV_FILE" ]; then
-        [ -z "$EXISTING_URL" ] && EXISTING_URL=$(grep -oP '(?<=^PAPERLESS_URL=).+' "$ENV_FILE" 2>/dev/null || true)
-        [ -z "$EXISTING_TOKEN" ] && EXISTING_TOKEN=$(grep -oP '(?<=^PAPERLESS_TOKEN=).+' "$ENV_FILE" 2>/dev/null || true)
-        EXISTING_CONSUME_DIR=$(grep -oP '(?<=^PAPERLESS_CONSUME_DIR=).+' "$ENV_FILE" 2>/dev/null || true)
+        if [ -z "$COLOR_CHOICE" ]; then
+            COLOR_DETECT=$COLOR_DEFAULT
+        elif [ "$COLOR_CHOICE" = "n" ] || [ "$COLOR_CHOICE" = "N" ]; then
+            COLOR_DETECT=false
+        else
+            COLOR_DETECT=true
+        fi
+        echo
     fi
 
-    # --- Mode-specific configuration ---
-    PAPERLESS_URL=""
-    PAPERLESS_TOKEN=""
-    PAPERLESS_CONSUME_DIR=""
+    # --- Mode-specific configuration (uses EXISTING_* defaults loaded above) ---
+    # Quick-install already populated PAPERLESS_* from EXISTING_*; reset only when reconfiguring.
+    if [ "$QUICK_INSTALL" = "false" ]; then
+        PAPERLESS_URL=""
+        PAPERLESS_TOKEN=""
+        PAPERLESS_CONSUME_DIR=""
+    fi
 
-    if [ "$MODE" = "paperless-api" ]; then
+    if [ "$MODE" = "paperless-api" ] && [ "$QUICK_INSTALL" = "false" ]; then
         echo "Paperless-ngx API configuration:"
 
         if [ -n "$EXISTING_URL" ]; then
@@ -181,7 +298,7 @@ install:
         fi
         echo
 
-    elif [ "$MODE" = "paperless-folder" ]; then
+    elif [ "$MODE" = "paperless-folder" ] && [ "$QUICK_INSTALL" = "false" ]; then
         echo "Paperless-ngx consume folder configuration:"
 
         if [ -n "$EXISTING_CONSUME_DIR" ]; then
@@ -241,8 +358,15 @@ install:
 
     echo
     echo "Installing udev rules (requires sudo)..."
-    sudo cp "$SCRIPT_DIR/99-scansnap-ix500.rules" /etc/udev/rules.d/
-    ok "Udev rules installed"
+    RULES_DEST=/etc/udev/rules.d/99-scansnap.rules
+    sed "s/__USERNAME__/$USER/g" "$SCRIPT_DIR/99-scansnap.rules" | sudo tee "$RULES_DEST" >/dev/null
+    ok "Udev rules installed to $RULES_DEST (username: $USER)"
+
+    # Clean up rules file from older install that used a model-specific name
+    if [ -f /etc/udev/rules.d/99-scansnap-ix500.rules ]; then
+        sudo rm /etc/udev/rules.d/99-scansnap-ix500.rules
+        ok "Removed old 99-scansnap-ix500.rules"
+    fi
 
     # --- Activate ---
     echo
@@ -367,10 +491,10 @@ uninstall:
     rm -f "$HOME/.config/systemd/user/scan-button.service"
     ok "Systemd service removed"
 
-    # Remove udev rules
+    # Remove udev rules (includes older model-specific filename for upgrades)
     echo
     echo "Removing udev rules (requires sudo)..."
-    sudo rm -f /etc/udev/rules.d/99-scansnap-ix500.rules
+    sudo rm -f /etc/udev/rules.d/99-scansnap.rules /etc/udev/rules.d/99-scansnap-ix500.rules
     ok "Udev rules removed"
 
     # Reload

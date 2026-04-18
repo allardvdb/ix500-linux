@@ -1,0 +1,14 @@
+# ScanSnap button polling service
+# Start on connect, stop on disconnect.
+#
+# Matches any Fujitsu ScanSnap by vendor ID (04c5) + product-string wildcard,
+# so this rule is not tied to a specific model.
+#
+# This file contains a placeholder that `just install` substitutes with the
+# invoking user's name — do not install it manually; run `just install`.
+
+# On connect - start the button polling service for logged-in user
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", ATTR{product}=="*ScanSnap*", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="scan-button.service"
+
+# On disconnect - stop the service for the user that ran `just install`
+ACTION=="remove", SUBSYSTEM=="usb", ENV{ID_VENDOR_ID}=="04c5", ENV{ID_MODEL}=="ScanSnap*", RUN+="/usr/bin/systemctl --user --machine=__USERNAME__@.host stop scan-button.service"
