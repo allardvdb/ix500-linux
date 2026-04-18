@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-One-button scanning workflow for the Fujitsu ScanSnap iX500 on Linux. Press the hardware button, get a PDF. Supports three delivery modes: upload to Paperless-ngx via API, write to a Paperless consume folder, or local OCR via ocrmypdf. Pure bash scripts orchestrated by a `justfile`.
+One-button scanning workflow for Fujitsu ScanSnap scanners on Linux. Press the hardware button, get a PDF. Supports three delivery modes: upload to Paperless-ngx via API, write to a Paperless consume folder, or local OCR via ocrmypdf. Pure bash scripts orchestrated by a `justfile`.
+
+The project name is a historical artifact — it started as iX500-specific, but now auto-detects any ScanSnap model supported by the SANE `fujitsu` backend. Scanner detection matches `fujitsu:ScanSnap [^:]+:\d+` across `scanimage -L` output, and the udev rule matches USB vendor `04c5` + product string containing "ScanSnap".
 
 ## Architecture
 
 The system has four components forming a hardware-to-PDF pipeline:
 
-1. **`99-scansnap-ix500.rules`** — Udev rule that auto-starts the systemd user service when the scanner (USB `04c5:132b`) is plugged in
+1. **`99-scansnap.rules`** — Udev rule template that auto-starts the systemd user service when any ScanSnap (USB vendor `04c5`, product string matching `*ScanSnap*`) is plugged in, and stops it on disconnect. Contains a `__USERNAME__` placeholder that `just install` substitutes with the invoking user — do not install this file by hand.
 2. **`scan-button.service`** — Systemd user service that runs the polling script; restarts on failure with 5s delay
 3. **`scan-button-poll`** — Bash script polling the scanner button every 0.1s via `scanimage -A`; triggers `scan` on press with 3s debounce; sends clickable desktop notifications (open Paperless/file on success, view logs on failure)
 4. **`scan`** — Bash script that drives the actual scanning: duplex TIFF capture at 300 DPI with bleed margin → optional per-page color/grayscale detection (10% saturation threshold) → ImageMagick PDF creation → delivery via API upload, consume folder, or local OCR
@@ -95,6 +97,9 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 - When `COLOR_DETECT=false`, all pages are converted to grayscale (no ImageMagick analysis).
 - All dependencies are in `/usr/bin`; no Homebrew paths needed in the service file.
 - `scan-button-poll` resolves the `scan` script path relative to its own location via `BASH_SOURCE`.
+- Scanner detection in both `scan` and `scan-button-poll` uses the regex `fujitsu:ScanSnap [^:]+:\d+` so any ScanSnap model is matched; the installer lists all detected devices and asks the user to pick when more than one is present.
+- `scan` probes `scanimage -A` per run and only passes options the specific scanner exposes (via a `has_opt` helper). The iX500 has `--overscan`/`--prepick` but the S1500 does not — setting those on an S1500 produces a "readonly option" warning. Keep this probe in place when adding new scan options.
+- On failure, `scan-button-poll`'s "View Logs" notification action opens a terminal wrapped in `sh -c '…; read -rp "Press Enter…"'` — without the trailing `read`, the terminal exits before the user can see anything.
 
 ## Platform
 

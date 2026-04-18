@@ -1,8 +1,10 @@
 # ix500-linux
 
-One-button scanning workflow for [Fujitsu ScanSnap iX500](https://www.fujitsu.com/global/products/computing/peripheral/scanners/scansnap/ix500/) on Linux.
+One-button scanning workflow for Fujitsu ScanSnap scanners on Linux.
 
 Press the scanner button → get a PDF. That's it.
+
+Originally written for the [ScanSnap iX500](https://www.fujitsu.com/global/products/computing/peripheral/scanners/scansnap/ix500/), but the scripts and udev rule auto-detect any ScanSnap model supported by the SANE `fujitsu` backend (iX500, S1500, etc.).
 
 ## Features
 
@@ -131,10 +133,10 @@ Pages with <10% color saturation are converted to grayscale automatically.
 ## Tested on
 
 - **OS**: [Bluefin](https://projectbluefin.io/) (Fedora Silverblue based)
-- **Scanner**: Fujitsu ScanSnap iX500
+- **Scanners**: Fujitsu ScanSnap iX500, ScanSnap S1500
 - **SANE**: sane-backends with fujitsu driver
 
-Should work on any Linux with SANE support for the iX500.
+Should work on any Linux with SANE support for the scanner. The udev rule matches any USB device from Fujitsu (vendor `04c5`) whose product string contains "ScanSnap", so additional models should work out of the box.
 
 ## Credits
 

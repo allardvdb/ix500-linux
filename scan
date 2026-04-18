@@ -1,5 +1,8 @@
 #!/bin/bash
-# scan - Quick scan from ScanSnap ix500
+# scan - Quick scan from a Fujitsu ScanSnap
+#
+# Works with any ScanSnap model supported by the SANE fujitsu backend
+# (iX500, S1500, etc.) — device is auto-detected from `scanimage -L`.
 #
 # Three modes (determined by environment variables):
 #   Paperless API mode:    PAPERLESS_URL and PAPERLESS_TOKEN set
@@ -18,14 +21,43 @@
 
 set -e
 
-# Scanner device — from env or auto-detect
+# Progress notifications update a single popup in place by reusing a
+# server-assigned notification ID.
+#
+# Why not a hardcoded -r ID: the freedesktop Notifications spec says servers
+# should replace an existing notification "with no flicker or other visual
+# cues". KDE Plasma implements this strictly — so a -r ID that doesn't match
+# a currently-live popup causes the update to land silently in the history
+# panel. Using --print-id on the first call captures a fresh, live ID from
+# the server; subsequent -r calls update the visible popup.
+#
+# NOTIFY_ID is usually inherited from scan-button-poll (which sent the very
+# first "Starting scan…" popup and captured its ID). For standalone/manual
+# runs, notify_progress captures its own ID on the first invocation.
+notify_progress() {
+    if [ -z "${NOTIFY_ID:-}" ]; then
+        # Standalone run — no parent captured an ID for us. Use default
+        # urgency on the first call so the popup actually appears, and -t 0
+        # so it stays visible across long scan-pipeline stages (otherwise it
+        # hits the ~5s default timeout and subsequent -r updates would land
+        # silently in notification history).
+        NOTIFY_ID=$(notify-send --print-id -t 0 -i scanner "$1" "$2" 2>/dev/null) || NOTIFY_ID=""
+    else
+        # Replacing a live popup — low urgency so updates don't re-trigger
+        # attention-grabbing behaviour, -t 0 so the popup keeps persisting
+        # until the final completion notification replaces it.
+        notify-send -r "$NOTIFY_ID" -t 0 -u low -i scanner "$1" "$2" 2>/dev/null || true
+    fi
+}
+
+# Scanner device — from env or auto-detect (matches any ScanSnap model)
 if [ -n "$SCANNER_DEVICE" ]; then
     DEVICE="$SCANNER_DEVICE"
 else
-    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap [^:]+:\d+" | head -1)
 fi
 if [ -z "$DEVICE" ]; then
-    echo "Error: ScanSnap iX500 not found. Is it connected and powered on?"
+    echo "Error: No ScanSnap found. Is it connected and powered on?"
     exit 1
 fi
 
@@ -53,28 +85,52 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Scanning (duplex, color, A4)..."
-scanimage --device "$DEVICE" \
-    --format=tiff \
-    --resolution 300 \
-    --mode Color \
-    --source "ADF Duplex" \
-    --page-width "$PAGE_WIDTH_MM" \
-    --page-height "$PAGE_HEIGHT_MM" \
-    --swskip 20 \
-    --swcrop=yes \
-    --swdespeck 2 \
-    --overscan On \
-    --prepick On \
-    --buffermode On \
-    --batch="$WORKDIR/page-%04d.tiff" \
-    --batch-count=-1 \
-    2>&1 | grep -v "^$" || true
+notify_progress "Scanning" "Feeding pages through the scanner…"
+
+# Probe the scanner's active option set; different ScanSnap models expose
+# different options (e.g. --overscan and --prepick exist on iX500 but not S1500).
+# Only pass options that the connected device actually supports.
+SCANNER_OPTS=$(scanimage -A --device "$DEVICE" 2>/dev/null || true)
+has_opt() {
+    echo "$SCANNER_OPTS" | grep -E "^ *--$1([ =[]|$)" \
+        | grep -qvE '\[(inactive|read-only|hardware)\]'
+}
+
+SCAN_ARGS=(
+    --device "$DEVICE"
+    --format=tiff
+    --resolution 300
+    --mode Color
+    --source "ADF Duplex"
+    --page-width "$PAGE_WIDTH_MM"
+    --page-height "$PAGE_HEIGHT_MM"
+)
+has_opt swskip     && SCAN_ARGS+=(--swskip 20)
+has_opt swcrop     && SCAN_ARGS+=(--swcrop=yes)
+has_opt swdespeck  && SCAN_ARGS+=(--swdespeck 2)
+has_opt overscan   && SCAN_ARGS+=(--overscan On)
+has_opt prepick    && SCAN_ARGS+=(--prepick On)
+has_opt buffermode && SCAN_ARGS+=(--buffermode On)
+SCAN_ARGS+=(
+    --batch="$WORKDIR/page-%04d.tiff"
+    --batch-count=-1
+)
+
+# Run scanimage and preserve its exit code through the output filter.
+set +e
+scanimage "${SCAN_ARGS[@]}" 2>&1 | grep -v "^$"
+SCAN_EXIT=${PIPESTATUS[0]}
+set -e
 
 # Count scanned pages
 PAGECOUNT=$(ls -1 "$WORKDIR"/page-*.tiff 2>/dev/null | wc -l)
 
 if [ "$PAGECOUNT" -eq 0 ]; then
-    echo "No pages scanned (feeder empty?)"
+    if [ "$SCAN_EXIT" -ne 0 ]; then
+        echo "Error: scanimage exited with status $SCAN_EXIT"
+    else
+        echo "No pages scanned (feeder empty?)"
+    fi
     exit 1
 fi
 
@@ -84,6 +140,7 @@ echo "Scanned $PAGECOUNT page(s)"
 # Can be disabled with COLOR_DETECT=false
 if [ "${COLOR_DETECT:-true}" = "true" ]; then
     echo "Detecting color..."
+    notify_progress "Processing" "$PAGECOUNT page(s) scanned — analysing colour…"
     COLOR_PAGES=0
     GRAY_PAGES=0
     for tiff in "$WORKDIR"/page-*.tiff; do
@@ -106,6 +163,7 @@ if [ "${COLOR_DETECT:-true}" = "true" ]; then
     fi
 else
     echo "Color detection disabled, converting to grayscale..."
+    notify_progress "Processing" "$PAGECOUNT page(s) scanned — converting to grayscale…"
     for tiff in "$WORKDIR"/page-*.tiff; do
         magick "$tiff" -colorspace Gray "$tiff"
     done
@@ -113,9 +171,11 @@ fi
 
 if [ "$MODE" = "paperless-api" ]; then
     echo "Creating PDF..."
+    notify_progress "Processing" "Creating PDF…"
     magick "$WORKDIR"/page-*.tiff "$WORKDIR/$FILENAME.pdf"
 
     echo "Uploading to Paperless..."
+    notify_progress "Processing" "Uploading to Paperless…"
     RESPONSE=$(curl -sk -w "\n%{http_code}" \
         -H "Authorization: Token $PAPERLESS_TOKEN" \
         -F "document=@$WORKDIR/$FILENAME.pdf" \
@@ -137,6 +197,7 @@ elif [ "$MODE" = "paperless-folder" ]; then
     OUTFILE="$PAPERLESS_CONSUME_DIR/$FILENAME.pdf"
 
     echo "Creating PDF..."
+    notify_progress "Processing" "Writing PDF to consume folder…"
     magick "$WORKDIR"/page-*.tiff "$OUTFILE"
 
     FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
@@ -148,6 +209,7 @@ else
     mkdir -p "$OUTDIR"
 
     echo "Running OCR..."
+    notify_progress "Processing" "Running OCR (this can take a while)…"
     magick "$WORKDIR"/page-*.tiff "$WORKDIR/combined.tiff"
     ocrmypdf "$WORKDIR/combined.tiff" "$OUTFILE" \
         -l nld+eng \
