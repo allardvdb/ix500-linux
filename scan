@@ -111,6 +111,45 @@ else
     done
 fi
 
+get_page_rotation() {
+    command -v tesseract >/dev/null 2>&1 || return 0
+    tesseract "$1" stdout --psm 0 2>/dev/null \
+        | grep -i 'Rotate:' \
+        | grep -oE '[0-9]+' \
+        | head -1
+}
+
+enhance_page() {
+    local tiff=$1
+    local tmp="${tiff}.enhancing"
+    local -a magick_args=()
+
+    if [ "${AUTO_ROTATE:-true}" = "true" ]; then
+        local rotate
+        rotate=$(get_page_rotation "$tiff")
+        case "$rotate" in
+            90|180|270) magick_args+=(-rotate "$rotate") ;;
+        esac
+        magick_args+=(-deskew 40%)
+    fi
+
+    if [ "${AUTO_CROP:-true}" = "true" ]; then
+        magick_args+=(-bordercolor white -border 1 -fuzz 10% -trim +repage -shave 1x1)
+    fi
+
+    [ ${#magick_args[@]} -eq 0 ] && return 0
+
+    magick "$tiff" "${magick_args[@]}" "$tmp"
+    mv "$tmp" "$tiff"
+}
+
+if [ "${AUTO_CROP:-true}" = "true" ] || [ "${AUTO_ROTATE:-true}" = "true" ]; then
+    echo "Enhancing pages..."
+    for tiff in "$WORKDIR"/page-*.tiff; do
+        enhance_page "$tiff"
+    done
+fi
+
 if [ "$MODE" = "paperless-api" ]; then
     echo "Creating PDF..."
     magick "$WORKDIR"/page-*.tiff "$WORKDIR/$FILENAME.pdf"
@@ -151,9 +190,6 @@ else
     magick "$WORKDIR"/page-*.tiff "$WORKDIR/combined.tiff"
     ocrmypdf "$WORKDIR/combined.tiff" "$OUTFILE" \
         -l nld+eng \
-        --rotate-pages \
-        --rotate-pages-threshold 2 \
-        --deskew \
         --clean \
         -O 3 \
         --jpeg-quality 60 \
