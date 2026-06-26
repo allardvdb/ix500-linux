@@ -42,6 +42,7 @@ fi
 BLEED_MM=10
 PAGE_WIDTH_MM=$((210 + BLEED_MM))
 PAGE_HEIGHT_MM=$((297 + BLEED_MM))
+RESOLUTION="${SCAN_RESOLUTION:-300}"
 
 TIMESTAMP=$(date '+%Y-%m-%d-%H%M%S')
 WORKDIR=$(mktemp -d)
@@ -55,7 +56,7 @@ trap cleanup EXIT
 echo "Scanning (duplex, color, A4)..."
 scanimage --device "$DEVICE" \
     --format=tiff \
-    --resolution 300 \
+    --resolution "$RESOLUTION" \
     --mode Color \
     --source "ADF Duplex" \
     --page-width "$PAGE_WIDTH_MM" \
@@ -119,28 +120,43 @@ get_page_rotation() {
         | head -1
 }
 
+crop_shave_pixels() {
+    if [ -n "${AUTO_CROP_SHAVE_PX:-}" ]; then
+        echo "$AUTO_CROP_SHAVE_PX"
+        return
+    fi
+    local shave_mm="${AUTO_CROP_SHAVE_MM:-1.5}"
+    echo "scale=0; $RESOLUTION * $shave_mm / 25.4 + 0.5" | bc
+}
+
 enhance_page() {
     local tiff=$1
     local tmp="${tiff}.enhancing"
-    local -a magick_args=()
+    local fuzz="${AUTO_CROP_FUZZ:-10%}"
+    local shave_px
+    shave_px=$(crop_shave_pixels)
 
     if [ "${AUTO_ROTATE:-true}" = "true" ]; then
         local rotate
+        local -a rotate_args=()
         rotate=$(get_page_rotation "$tiff")
         case "$rotate" in
-            90|180|270) magick_args+=(-rotate "$rotate") ;;
+            90|180|270) rotate_args+=(-rotate "$rotate") ;;
         esac
-        magick_args+=(-deskew 40%)
+        rotate_args+=(-deskew 40% -background white)
+        magick "$tiff" "${rotate_args[@]}" "$tmp"
+        mv "$tmp" "$tiff"
     fi
 
     if [ "${AUTO_CROP:-true}" = "true" ]; then
-        magick_args+=(-bordercolor white -border 1 -fuzz 10% -trim +repage -shave 1x1)
+        # Shave scanner bed grey first — white-border trim can't remove it
+        magick "$tiff" \
+            -shave "${shave_px}x${shave_px}" \
+            -bordercolor white -border 1 \
+            -fuzz "$fuzz" -trim +repage -shave 1x1 \
+            "$tmp"
+        mv "$tmp" "$tiff"
     fi
-
-    [ ${#magick_args[@]} -eq 0 ] && return 0
-
-    magick "$tiff" "${magick_args[@]}" "$tmp"
-    mv "$tmp" "$tiff"
 }
 
 if [ "${AUTO_CROP:-true}" = "true" ] || [ "${AUTO_ROTATE:-true}" = "true" ]; then
