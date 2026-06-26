@@ -94,7 +94,7 @@ install:
 
     # --- Scanner detection ---
     echo "Detecting scanner..."
-    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1 || true)
+    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1 || true)
 
     if [ -n "$DETECTED_DEVICE" ]; then
         ok "Found: $DETECTED_DEVICE"

@@ -22,10 +22,10 @@ set -e
 if [ -n "$SCANNER_DEVICE" ]; then
     DEVICE="$SCANNER_DEVICE"
 else
-    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1)
+    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1)
 fi
 if [ -z "$DEVICE" ]; then
-    echo "Error: ScanSnap iX500 not found. Is it connected and powered on?"
+    echo "Error: ScanSnap iX1300 not found. Is it connected and powered on?"
     exit 1
 fi
 

@@ -15,7 +15,7 @@ log() {
 
 # Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
 detect_device() {
-    scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX500:\d+" | head -1
+    scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1
 }
 
 get_button_state() {
@@ -30,7 +30,7 @@ else
     DEVICE=$(detect_device)
 fi
 if [ -z "$DEVICE" ]; then
-    log "Error: ScanSnap iX500 not found"
+    log "Error: ScanSnap iX1300 not found"
     exit 1
 fi
 

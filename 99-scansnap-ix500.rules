@@ -5,7 +5,7 @@
 # the service will handle disconnects gracefully by waiting and retrying.
 
 # On connect - start the button polling service for logged-in user
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", ATTR{idProduct}=="132b", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="scan-button.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", ATTR{idProduct}=="162c", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="scan-button.service"
 
 # On disconnect - the service handles this gracefully (waits and retries)
 # Uncomment and adjust username if you want explicit stop:
