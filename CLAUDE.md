@@ -12,16 +12,20 @@ The system has two entry points — the hardware button and a desktop GUI — bu
 
 1. **`99-scansnap-ix500.rules`** — Udev rule that auto-starts the systemd user service when the scanner (USB `04c5:132b`) is plugged in
 2. **`scan-button.service`** — Systemd user service that runs the polling script; restarts on failure with 5s delay
-3. **`scan-button-poll`** — Bash script polling the scanner button every 0.1s via `scanimage -A`; triggers `scan` on press with 3s debounce; sends clickable desktop notifications (open Paperless/file on success, view logs on failure)
-4. **`scan-lib.sh`** — Sourced bash library holding all reusable routines: `resolve_device`, `scan_batch`, `apply_color_detection`, `enhance_pages`, `build_pdf`, `deliver_paperless`, `deliver_naps2`. Contains no top-level logic — callers wire the functions together.
-5. **`scan`** — Thin one-button entry point. Sources `scan-lib.sh`, captures one duplex batch, processes pages, delivers to Paperless/local. Used by the button poller.
+3. **`scan-button-poll`** — Bash script polling the scanner button every 0.1s via `scanimage -A`; on press it forwards to the GUI when one is running (`scan-gui --scan`) and otherwise runs `scan` headlessly; 3s debounce; sends clickable desktop notifications for headless scans (open Paperless/file on success, view logs on failure)
+4. **`scan-lib.sh`** — Sourced bash library holding all reusable routines: `resolve_device`, `resolve_source`, `scan_batch`, `apply_color_detection`, `enhance_pages`, `build_pdf`, `deliver_paperless`, `deliver_naps2`. Contains no top-level logic — callers wire the functions together.
+5. **`scan`** — Thin one-button entry point. Sources `scan-lib.sh`, captures one duplex batch, processes pages, delivers to Paperless/local. Used by the button poller for headless scans (single page + Paperless).
 6. **`scan-doc`** — CLI used by the GUI to build a document across one or more batches. `scan-doc capture <workdir>` scans and processes one batch into a working directory (pages named `batch-NN-page-NNNN.tiff` so order is preserved); `scan-doc finalize <workdir> --target paperless|naps2` combines every captured page into one PDF, delivers it, and removes the working directory.
-7. **`scan-gui`** — PyGObject/GTK4 desktop app. Two radio sections (Pages: single/multi; Send to: Paperless/NAPS2) plus a Scan button. It only drives the flow: it calls `scan-doc capture`, asks "scan more?" between batches in multi-page mode, then calls `scan-doc finalize`. Scanning runs on a worker thread to keep the UI responsive.
+7. **`scan-gui`** — PyGObject/GTK4 desktop app, registered as a single instance. Two radio sections (Pages: single/multi; Send to: Paperless/NAPS2) plus a Scan button. It only drives the flow: it calls `scan-doc capture`, shows in-window next-page controls between pages in multi-page mode, then calls `scan-doc finalize`. A scan is triggered by the on-screen button or by `scan-gui --scan` (how the hardware button reaches a running window), routed through an idle/busy/awaiting-next state so either button starts a scan or adds the next page. Scanning runs on a worker thread to keep the UI responsive.
+
+### Input auto-detection
+
+`resolve_source` reads the hardware paper sensors once via `scanimage -A` and chooses the input that holds a document: the top ADF feeder (sensor `page-loaded`) maps to source `ADF Duplex`, and the front/return slot (sensor `card-loaded`) maps to source `Card Duplex`. If both inputs are loaded it errors; if neither is loaded the caller emits the usual "feeder empty" message. Both `scan` and `scan-doc capture` resolve the source before each capture, so multi-page documents can mix feeder and front-slot pages.
 
 ### GUI workflow
 
 - **Single page**: one `capture` → `finalize`.
-- **Multi page**: `capture`, then an AlertDialog loop ("Scan more pages" / "Finish") appending batches into the same working directory, then a single `finalize` combining them into one PDF.
+- **Multi page**: `capture`, then in-window next-page controls (the Scan button becomes "Scan next page" and a "Finish" button appears) appending pages into the same working directory, then a single `finalize` combining them into one PDF. Because the controls live in the window (not a modal dialog), a hardware button press forwarded as `scan-gui --scan` adds the next page just like clicking "Scan next page".
 - **Send to Paperless**: `finalize --target paperless`, which reuses the same API/folder/local delivery as the hardware button.
 - **Send to NAPS2**: `finalize --target naps2`, which builds the PDF into `~/Documents/scanner-inbox/` and opens it in the NAPS2 desktop app (`naps2 <pdf>`).
 

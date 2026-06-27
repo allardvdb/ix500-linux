@@ -27,6 +27,31 @@ resolve_device() {
     echo "$device"
 }
 
+# Echo the SANE source string for whichever input holds a document.
+#   Top ADF feeder (sensor page-loaded)  -> "ADF Duplex"
+#   Front/return slot (sensor card-loaded) -> "Card Duplex"
+# Return codes: 0 with the source on stdout; 1 when both inputs are loaded
+# (an error is printed); 2 when neither is loaded (silent, so callers can
+# emit their own "feeder empty" message).
+resolve_source() {
+    local device=$1
+    local options feeder front
+    options=$(scanimage --device "$device" -A 2>/dev/null)
+    feeder=$(echo "$options" | grep -oP '(?<=--page-loaded\[=\(yes\|no\)\] \[)\w+')
+    front=$(echo "$options" | grep -oP '(?<=--card-loaded\[=\(yes\|no\)\] \[)\w+')
+
+    if [ "$feeder" = "yes" ] && [ "$front" = "yes" ]; then
+        echo "Error: documents loaded in both the feeder and the front slot - use only one." >&2
+        return 1
+    elif [ "$feeder" = "yes" ]; then
+        echo "ADF Duplex"
+    elif [ "$front" = "yes" ]; then
+        echo "Card Duplex"
+    else
+        return 2
+    fi
+}
+
 # Echo which Paperless delivery mode the environment selects.
 paperless_mode() {
     if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
@@ -38,14 +63,15 @@ paperless_mode() {
     fi
 }
 
-# Capture one duplex batch from the feeder into "<prefix>-NNNN.tiff" files.
+# Capture one duplex batch into "<prefix>-NNNN.tiff" files from the given
+# SANE source ("ADF Duplex" for the feeder, "Card Duplex" for the front slot).
 scan_batch() {
-    local device=$1 prefix=$2
+    local device=$1 source=$2 prefix=$3
     scanimage --device "$device" \
         --format=tiff \
         --resolution "$RESOLUTION" \
         --mode Color \
-        --source "ADF Duplex" \
+        --source "$source" \
         --page-width "$PAGE_WIDTH_MM" \
         --page-height "$PAGE_HEIGHT_MM" \
         --swskip 20 \

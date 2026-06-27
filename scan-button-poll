@@ -5,12 +5,70 @@
 POLL_INTERVAL=0.1
 DEBOUNCE=3
 
-# Resolve scan script relative to this script's location
+# Resolve scan scripts relative to this script's location
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCAN_SCRIPT="$SCRIPT_DIR/scan"
+SCAN_GUI="$SCRIPT_DIR/scan-gui"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
+}
+
+# True when the scan GUI is running and owns its application name, so a button
+# press should be forwarded to the window instead of scanning headlessly.
+gui_running() {
+    if command -v gdbus >/dev/null 2>&1; then
+        local owned
+        owned=$(gdbus call --session \
+            --dest org.freedesktop.DBus \
+            --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.NameHasOwner \
+            com.github.ix500linux.ScanGui 2>/dev/null)
+        [ "$owned" = "(true,)" ] && return 0
+        [ "$owned" = "(false,)" ] && return 1
+    fi
+    pgrep -f 'scan-gui' >/dev/null 2>&1
+}
+
+# Headless one-button scan (single page + Paperless) with desktop notifications.
+# Used only when the GUI is not running.
+run_headless_scan() {
+    local SCAN_OUTPUT SCAN_OK OUTFILE
+    SCAN_OUTPUT=$("$SCAN_SCRIPT" 2>&1) && SCAN_OK=true || SCAN_OK=false
+    echo "$SCAN_OUTPUT"
+
+    if [ "$SCAN_OK" = true ]; then
+        log "Scan completed successfully"
+        # Send clickable desktop notification (in background to not block polling)
+        if [ -n "$PAPERLESS_URL" ]; then
+            (
+                ACTION=$(notify-send -i scanner --action="open=Open in Paperless" \
+                    "Scan Complete" "Document uploaded to Paperless" 2>/dev/null)
+                [ "$ACTION" = "open" ] && xdg-open "$PAPERLESS_URL" 2>/dev/null
+            ) &
+        elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
+            OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
+            (
+                ACTION=$(notify-send -i scanner --action="open=Open" \
+                    "Scan Complete" "Document saved to consume folder" 2>/dev/null)
+                [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
+            ) &
+        else
+            OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
+            (
+                ACTION=$(notify-send -i scanner --action="open=Open" \
+                    "Scan Complete" "Document saved to scanner-inbox" 2>/dev/null)
+                [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
+            ) &
+        fi
+    else
+        log "Scan failed"
+        (
+            ACTION=$(notify-send -u critical -i dialog-error --action="logs=View Logs" \
+                "Scan Failed" "Something went wrong during scanning" 2>/dev/null)
+            [ "$ACTION" = "logs" ] && xdg-terminal-exec journalctl --user -u scan-button.service -n 50 --no-pager 2>/dev/null
+        ) &
+    fi
 }
 
 # Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
@@ -44,43 +102,12 @@ while true; do
     button_state=$(get_button_state)
 
     if [ "$button_state" = "yes" ]; then
-        log "Button pressed! Starting scan..."
-
-        # Run the scan script, capture output
-        SCAN_OUTPUT=$("$SCAN_SCRIPT" 2>&1) && SCAN_OK=true || SCAN_OK=false
-        echo "$SCAN_OUTPUT"
-
-        if [ "$SCAN_OK" = true ]; then
-            log "Scan completed successfully"
-            # Send clickable desktop notification (in background to not block polling)
-            if [ -n "$PAPERLESS_URL" ]; then
-                (
-                    ACTION=$(notify-send -i scanner --action="open=Open in Paperless" \
-                        "Scan Complete" "Document uploaded to Paperless" 2>/dev/null)
-                    [ "$ACTION" = "open" ] && xdg-open "$PAPERLESS_URL" 2>/dev/null
-                ) &
-            elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
-                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
-                (
-                    ACTION=$(notify-send -i scanner --action="open=Open" \
-                        "Scan Complete" "Document saved to consume folder" 2>/dev/null)
-                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
-                ) &
-            else
-                OUTFILE=$(echo "$SCAN_OUTPUT" | grep -oP '(?<=Done: )\S+')
-                (
-                    ACTION=$(notify-send -i scanner --action="open=Open" \
-                        "Scan Complete" "Document saved to scanner-inbox" 2>/dev/null)
-                    [ "$ACTION" = "open" ] && xdg-open "$OUTFILE" 2>/dev/null
-                ) &
-            fi
+        if gui_running; then
+            log "Button pressed! Forwarding to GUI..."
+            "$SCAN_GUI" --scan >/dev/null 2>&1 &
         else
-            log "Scan failed"
-            (
-                ACTION=$(notify-send -u critical -i dialog-error --action="logs=View Logs" \
-                    "Scan Failed" "Something went wrong during scanning" 2>/dev/null)
-                [ "$ACTION" = "logs" ] && xdg-terminal-exec journalctl --user -u scan-button.service -n 50 --no-pager 2>/dev/null
-            ) &
+            log "Button pressed! Starting headless scan..."
+            run_headless_scan
         fi
 
         # Debounce - wait before polling again to let button release

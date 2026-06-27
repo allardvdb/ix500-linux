@@ -8,7 +8,9 @@ Press the scanner button → get a PDF. That's it.
 
 - **One-button scanning** - press the hardware button, get a PDF
 - **Desktop GUI** - pick single/multi page and Paperless/NAPS2, then scan
-- **Multi-page documents** - keep scanning batches and combine them into one PDF
+- **Button follows the GUI** - when the GUI is open the hardware button uses its current selection (and adds the next page in multi-page mode); when it's closed the button scans a single page to Paperless
+- **Feeder or front slot** - automatically scans from whichever input has a document loaded
+- **Multi-page documents** - keep scanning pages and combine them into one PDF
 - **Duplex A4 color** - scans both sides automatically
 - **Smart blank detection** - skips empty back pages (20% threshold)
 - **Auto color/grayscale** - converts B&W pages to grayscale for smaller files
@@ -20,10 +22,10 @@ Press the scanner button → get a PDF. That's it.
 ### Desktop GUI
 Run `just gui` (or launch **ScanSnap Scan** from your app menu). The window has two choices:
 
-- **Pages** — *Scan single page* (one scan session) or *Scan multi page* (keep loading pages; each batch is appended and everything is combined into one PDF).
+- **Pages** — *Scan single page* (one scan session) or *Scan multi page* (keep loading pages; each page is appended and everything is combined into one PDF).
 - **Send to** — *Send to Paperless* (uses the configured Paperless/local pipeline) or *Send to NAPS2* (opens the finished PDF in NAPS2 for review/editing).
 
-Press **Scan**. In multi-page mode you'll be asked "Scan more pages / Finish" after each batch.
+Press **Scan** (on screen or the hardware button). In multi-page mode the Scan button becomes **Scan next page** and a **Finish** button appears after each page; the hardware button adds the next page too, so you can keep loading pages without touching the keyboard. Pages can come from either the feeder or the front slot, and you can switch between them between pages.
 
 ### Paperless-ngx API mode (recommended)
 When `PAPERLESS_URL` and `PAPERLESS_TOKEN` are set, scans are uploaded directly to Paperless-ngx via its API. Paperless handles OCR, archiving, compression, and search.
@@ -66,10 +68,11 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 ## Usage
 
 ### One-button scanning
-1. Put documents in the feeder
+1. Put documents in the feeder or the front slot
 2. Press the blue Scan button on the scanner
-3. Wait for desktop notification "Scan Complete"
-4. Click the notification to open the result
+3. With the GUI closed this scans a single page to Paperless; with the GUI open it uses the window's current selection
+4. Wait for desktop notification "Scan Complete" (headless scans)
+5. Click the notification to open the result
 
 ### GUI scanning
 ```bash

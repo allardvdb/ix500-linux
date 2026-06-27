@@ -21,8 +21,13 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 FILENAME="${1:-scan-$(date '+%Y-%m-%d-%H%M%S')}"
 
-echo "Scanning (duplex, color, A4)..."
-scan_batch "$DEVICE" "$WORKDIR/page"
+SOURCE=$(resolve_source "$DEVICE") || {
+    [ $? -eq 2 ] && echo "No pages scanned (feeder empty?)" >&2
+    exit 1
+}
+
+echo "Scanning (duplex, color, A4) from $SOURCE..."
+scan_batch "$DEVICE" "$SOURCE" "$WORKDIR/page"
 
 pages=("$WORKDIR"/page-*.tiff)
 if [ ! -e "${pages[0]}" ]; then

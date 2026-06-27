@@ -362,6 +362,25 @@ check:
         echo "Some dependencies are missing (not all may be needed for your mode)."
     fi
 
+# Copy latest scripts to ~/.local/bin and restart the button service.
+# Use after code changes; does not touch config, udev, or dependencies.
+reload:
+    #!/usr/bin/env bash
+    set -e
+    SCRIPT_DIR="{{justfile_directory()}}"
+    BIN="$HOME/.local/bin"
+
+    mkdir -p "$BIN"
+    cp "$SCRIPT_DIR/scan" "$SCRIPT_DIR/scan-button-poll" \
+       "$SCRIPT_DIR/scan-lib.sh" "$SCRIPT_DIR/scan-doc" "$SCRIPT_DIR/scan-gui" \
+       "$BIN/"
+    chmod +x "$BIN/scan" "$BIN/scan-button-poll" "$BIN/scan-doc" "$BIN/scan-gui"
+    echo "Scripts updated in $BIN"
+
+    systemctl --user restart scan-button.service 2>/dev/null && \
+        echo "scan-button.service restarted" || \
+        echo "scan-button.service not running (connect scanner to activate)"
+
 # Launch the scan GUI
 gui:
     ./scan-gui

@@ -35,12 +35,16 @@ capture() {
     local workdir=$1
     [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
 
-    local device prefix
+    local device source prefix
     device=$(resolve_device)
+    source=$(resolve_source "$device") || {
+        [ $? -eq 2 ] && echo "No pages scanned (feeder empty?)" >&2
+        exit 1
+    }
     prefix=$(next_batch_prefix "$workdir")
 
-    echo "Scanning (duplex, color, A4)..."
-    scan_batch "$device" "$prefix"
+    echo "Scanning (duplex, color, A4) from $source..."
+    scan_batch "$device" "$source" "$prefix"
 
     local new_pages=("$prefix"-*.tiff)
     if [ ! -e "${new_pages[0]}" ]; then
