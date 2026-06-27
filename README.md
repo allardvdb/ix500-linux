@@ -7,12 +7,23 @@ Press the scanner button → get a PDF. That's it.
 ## Features
 
 - **One-button scanning** - press the hardware button, get a PDF
+- **Desktop GUI** - pick single/multi page and Paperless/NAPS2, then scan
+- **Multi-page documents** - keep scanning batches and combine them into one PDF
 - **Duplex A4 color** - scans both sides automatically
 - **Smart blank detection** - skips empty back pages (20% threshold)
 - **Auto color/grayscale** - converts B&W pages to grayscale for smaller files
 - **Three output modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) via API, write to a Paperless consume folder, or save locally with OCR
+- **Send to NAPS2** - hand the finished PDF to the [NAPS2](https://www.naps2.com/) desktop app
 - **Clickable notifications** - open the result directly from the notification
 - **Robust disconnect handling** - no crashes when scanner is unplugged
+
+### Desktop GUI
+Run `just gui` (or launch **ScanSnap Scan** from your app menu). The window has two choices:
+
+- **Pages** — *Scan single page* (one scan session) or *Scan multi page* (keep loading pages; each batch is appended and everything is combined into one PDF).
+- **Send to** — *Send to Paperless* (uses the configured Paperless/local pipeline) or *Send to NAPS2* (opens the finished PDF in NAPS2 for review/editing).
+
+Press **Scan**. In multi-page mode you'll be asked "Scan more pages / Finish" after each batch.
 
 ### Paperless-ngx API mode (recommended)
 When `PAPERLESS_URL` and `PAPERLESS_TOKEN` are set, scans are uploaded directly to Paperless-ngx via its API. Paperless handles OCR, archiving, compression, and search.
@@ -30,6 +41,10 @@ Without Paperless configured, scans are processed locally with ocrmypdf (Dutch +
 - **ImageMagick** (`magick`) - image processing and PDF creation
 - **bc** - floating point math for color detection
 - **libnotify** (`notify-send`), **xdg-utils** (`xdg-open`), **xdg-terminal-exec** - desktop notifications
+
+GUI only:
+- **python3** with **PyGObject** and **GTK 4** - the desktop window
+- **NAPS2** (`naps2`) - target for "Send to NAPS2"
 
 Local mode only:
 - **ocrmypdf** - OCR and PDF creation
@@ -56,6 +71,12 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 3. Wait for desktop notification "Scan Complete"
 4. Click the notification to open the result
 
+### GUI scanning
+```bash
+just gui       # Launch the scan window (or use the "ScanSnap Scan" app entry)
+```
+Pick single/multi page and Paperless/NAPS2, then press Scan.
+
 ### Manual scanning
 ```bash
 scan                  # Auto-named: scan-YYYY-MM-DD-HHMMSS.pdf
@@ -64,6 +85,7 @@ scan my-document      # Custom name: my-document.pdf
 
 ### Service management
 ```bash
+just gui       # Launch the scan GUI
 just status    # Show service status
 just logs      # Follow service logs
 just restart   # Restart the service

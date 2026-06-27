@@ -8,12 +8,22 @@ One-button scanning workflow for the Fujitsu ScanSnap iX500 on Linux. Press the 
 
 ## Architecture
 
-The system has four components forming a hardware-to-PDF pipeline:
+The system has two entry points — the hardware button and a desktop GUI — built on a shared scanning library.
 
 1. **`99-scansnap-ix500.rules`** — Udev rule that auto-starts the systemd user service when the scanner (USB `04c5:132b`) is plugged in
 2. **`scan-button.service`** — Systemd user service that runs the polling script; restarts on failure with 5s delay
 3. **`scan-button-poll`** — Bash script polling the scanner button every 0.1s via `scanimage -A`; triggers `scan` on press with 3s debounce; sends clickable desktop notifications (open Paperless/file on success, view logs on failure)
-4. **`scan`** — Bash script that drives the actual scanning: duplex TIFF capture at 300 DPI with bleed margin → optional per-page color/grayscale detection (10% saturation threshold) → ImageMagick PDF creation → delivery via API upload, consume folder, or local OCR
+4. **`scan-lib.sh`** — Sourced bash library holding all reusable routines: `resolve_device`, `scan_batch`, `apply_color_detection`, `enhance_pages`, `build_pdf`, `deliver_paperless`, `deliver_naps2`. Contains no top-level logic — callers wire the functions together.
+5. **`scan`** — Thin one-button entry point. Sources `scan-lib.sh`, captures one duplex batch, processes pages, delivers to Paperless/local. Used by the button poller.
+6. **`scan-doc`** — CLI used by the GUI to build a document across one or more batches. `scan-doc capture <workdir>` scans and processes one batch into a working directory (pages named `batch-NN-page-NNNN.tiff` so order is preserved); `scan-doc finalize <workdir> --target paperless|naps2` combines every captured page into one PDF, delivers it, and removes the working directory.
+7. **`scan-gui`** — PyGObject/GTK4 desktop app. Two radio sections (Pages: single/multi; Send to: Paperless/NAPS2) plus a Scan button. It only drives the flow: it calls `scan-doc capture`, asks "scan more?" between batches in multi-page mode, then calls `scan-doc finalize`. Scanning runs on a worker thread to keep the UI responsive.
+
+### GUI workflow
+
+- **Single page**: one `capture` → `finalize`.
+- **Multi page**: `capture`, then an AlertDialog loop ("Scan more pages" / "Finish") appending batches into the same working directory, then a single `finalize` combining them into one PDF.
+- **Send to Paperless**: `finalize --target paperless`, which reuses the same API/folder/local delivery as the hardware button.
+- **Send to NAPS2**: `finalize --target naps2`, which builds the PDF into `~/Documents/scanner-inbox/` and opens it in the NAPS2 desktop app (`naps2 <pdf>`).
 
 ### Three modes
 
@@ -42,6 +52,7 @@ All operations are run via `just`:
 |---|---|
 | `just` | List available recipes |
 | `just install` | Full interactive install (mode selection, scanner detection, config, activate) |
+| `just gui` | Launch the scan GUI (`scan-gui`) |
 | `just check` | Check dependencies for all modes |
 | `just status` | Show service status |
 | `just logs` | Follow service logs |
@@ -67,6 +78,10 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 - **bc** — floating point comparison for color detection
 - **notify-send**, **xdg-open**, **xdg-terminal-exec** — desktop notifications
 
+**GUI (`scan-gui`):**
+- **python3** with **PyGObject** and **GTK 4** — the desktop window
+- **NAPS2** (`naps2`) — receives the final PDF in "Send to NAPS2" mode
+
 **Local mode only:**
 - **ocrmypdf** — OCR and PDF creation
 - **Tesseract** with `nld` and `eng` trained data
@@ -90,6 +105,8 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 
 ## Conventions
 
+- Shared scanning logic lives only in `scan-lib.sh`; `scan` and `scan-doc` are thin orchestrators that source it. Add new scanning behavior as a focused function in the library rather than inline in an entry point.
+- The GUI (`scan-gui`) never scans directly — it shells out to `scan-doc` so all capture/processing/delivery logic stays in one place.
 - The `scan` script uses `WORKDIR` (not `TMPDIR`) for its temp directory to avoid shadowing the standard env var.
 - Color/grayscale detection runs in both Paperless and local modes when enabled — it reduces upload/file size.
 - When `COLOR_DETECT=false`, all pages are converted to grayscale (no ImageMagick analysis).

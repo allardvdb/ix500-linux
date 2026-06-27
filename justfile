@@ -81,6 +81,17 @@ install:
     check_cmd xdg-open "xdg-utils" || DEPS_OK=false
     check_cmd xdg-terminal-exec "" || DEPS_OK=false
 
+    # GUI dependencies (scan-gui)
+    check_cmd python3 "python3" || DEPS_OK=false
+    if python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk" &>/dev/null; then
+        ok "python GTK 4 bindings found"
+    else
+        fail "python GTK 4 bindings missing"
+        MISSING_SYSTEM+=("python3-gobject" "gtk4")
+        DEPS_OK=false
+    fi
+    check_cmd naps2 "naps2" || DEPS_OK=false
+
     echo
 
     if [ "$DEPS_OK" = false ]; then
@@ -231,9 +242,18 @@ install:
     SCRIPT_DIR="{{justfile_directory()}}"
 
     mkdir -p "$HOME/.local/bin"
-    cp "$SCRIPT_DIR/scan" "$SCRIPT_DIR/scan-button-poll" "$HOME/.local/bin/"
-    chmod +x "$HOME/.local/bin/scan" "$HOME/.local/bin/scan-button-poll"
+    cp "$SCRIPT_DIR/scan" "$SCRIPT_DIR/scan-button-poll" \
+       "$SCRIPT_DIR/scan-lib.sh" "$SCRIPT_DIR/scan-doc" "$SCRIPT_DIR/scan-gui" \
+       "$HOME/.local/bin/"
+    chmod +x "$HOME/.local/bin/scan" "$HOME/.local/bin/scan-button-poll" \
+             "$HOME/.local/bin/scan-doc" "$HOME/.local/bin/scan-gui"
     ok "Scripts installed to ~/.local/bin/"
+
+    # Desktop launcher for the GUI (Exec points at the installed script)
+    mkdir -p "$HOME/.local/share/applications"
+    sed "s|^Exec=scan-gui|Exec=$HOME/.local/bin/scan-gui|" \
+        "$SCRIPT_DIR/scan-gui.desktop" > "$HOME/.local/share/applications/scan-gui.desktop"
+    ok "GUI desktop launcher installed"
 
     mkdir -p "$HOME/.config/systemd/user"
     cp "$SCRIPT_DIR/scan-button.service" "$HOME/.config/systemd/user/"
@@ -308,6 +328,17 @@ check:
     check_cmd xdg-terminal-exec
 
     echo
+    echo "GUI dependencies:"
+    check_cmd python3
+    if python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk" &>/dev/null; then
+        ok "python GTK 4 bindings found"
+    else
+        fail "python GTK 4 bindings missing"
+        ALL_OK=false
+    fi
+    check_cmd naps2
+
+    echo
     echo "Paperless API mode:"
     check_cmd curl
 
@@ -330,6 +361,10 @@ check:
     else
         echo "Some dependencies are missing (not all may be needed for your mode)."
     fi
+
+# Launch the scan GUI
+gui:
+    ./scan-gui
 
 # Show service status
 status:
@@ -360,8 +395,14 @@ uninstall:
     systemctl --user disable scan-button.service 2>/dev/null && ok "Service disabled" || true
 
     # Remove scripts
-    rm -f "$HOME/.local/bin/scan" "$HOME/.local/bin/scan-button-poll"
+    rm -f "$HOME/.local/bin/scan" "$HOME/.local/bin/scan-button-poll" \
+          "$HOME/.local/bin/scan-lib.sh" "$HOME/.local/bin/scan-doc" \
+          "$HOME/.local/bin/scan-gui"
     ok "Scripts removed from ~/.local/bin/"
+
+    # Remove GUI desktop launcher
+    rm -f "$HOME/.local/share/applications/scan-gui.desktop"
+    ok "GUI desktop launcher removed"
 
     # Remove service file
     rm -f "$HOME/.config/systemd/user/scan-button.service"

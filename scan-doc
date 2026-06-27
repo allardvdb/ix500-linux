@@ -1,0 +1,98 @@
+#!/bin/bash
+# scan-doc - Multi-batch scanning workflow used by the GUI.
+#
+# A "document" is a working directory that accumulates one or more scan
+# batches. The GUI captures into the same directory as many times as the
+# user wants, then finalizes once to deliver a single combined PDF.
+#
+# Usage:
+#   scan-doc capture  <workdir>
+#       Scan one duplex batch into <workdir>, cleaning up the new pages.
+#       Prints the number of pages added. Exits non-zero if the feeder
+#       was empty.
+#
+#   scan-doc finalize <workdir> --target paperless|naps2 [--name NAME]
+#       Combine every captured page into one PDF, deliver it, and remove
+#       the working directory.
+
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/scan-lib.sh"
+
+# Pages are named batch-<NN>-page-<NNNN>.tiff so the natural sort order
+# matches scan order across multiple batches.
+batch_glob() { echo "$1"/batch-*-page-*.tiff; }
+
+next_batch_prefix() {
+    local workdir=$1
+    local count
+    count=$(ls -1d "$workdir"/batch-*-page-0001.tiff 2>/dev/null | wc -l)
+    printf '%s/batch-%02d-page' "$workdir" "$((count + 1))"
+}
+
+capture() {
+    local workdir=$1
+    [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
+
+    local device prefix
+    device=$(resolve_device)
+    prefix=$(next_batch_prefix "$workdir")
+
+    echo "Scanning (duplex, color, A4)..."
+    scan_batch "$device" "$prefix"
+
+    local new_pages=("$prefix"-*.tiff)
+    if [ ! -e "${new_pages[0]}" ]; then
+        echo "No pages scanned (feeder empty?)" >&2
+        exit 1
+    fi
+    echo "Scanned ${#new_pages[@]} page(s)"
+
+    apply_color_detection "${new_pages[@]}"
+    enhance_pages "${new_pages[@]}"
+}
+
+finalize() {
+    local workdir=$1
+    shift
+
+    local target="" name=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target) target=$2; shift 2 ;;
+            --name)   name=$2; shift 2 ;;
+            *) echo "Unknown finalize option: $1" >&2; exit 1 ;;
+        esac
+    done
+
+    [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
+    name="${name:-scan-$(date '+%Y-%m-%d-%H%M%S')}"
+
+    local pages
+    pages=($(batch_glob "$workdir"))
+    if [ ! -e "${pages[0]}" ]; then
+        echo "Nothing to finalize (no pages captured)" >&2
+        rm -rf "$workdir"
+        exit 1
+    fi
+    echo "Finalizing ${#pages[@]} page(s)..."
+
+    case "$target" in
+        paperless) deliver_paperless "$name" "${pages[@]}" ;;
+        naps2)     deliver_naps2 "$name" "${pages[@]}" ;;
+        *) echo "Unknown or missing --target (expected paperless|naps2)" >&2; exit 1 ;;
+    esac
+
+    rm -rf "$workdir"
+}
+
+COMMAND=${1:-}
+case "$COMMAND" in
+    capture)  shift; capture "$@" ;;
+    finalize) shift; finalize "$@" ;;
+    *)
+        echo "Usage: scan-doc {capture <workdir> | finalize <workdir> --target paperless|naps2 [--name NAME]}" >&2
+        exit 1
+        ;;
+esac

@@ -1,216 +1,36 @@
 #!/bin/bash
-# scan - Quick scan from ScanSnap ix500
+# scan - One-button scan from the ScanSnap iX1300 to Paperless (or local OCR).
 #
-# Three modes (determined by environment variables):
-#   Paperless API mode:    PAPERLESS_URL and PAPERLESS_TOKEN set
-#                          → uploads PDF to Paperless-ngx via API
-#   Paperless folder mode: PAPERLESS_CONSUME_DIR set
-#                          → writes PDF directly to consume folder
-#   Local mode:            none of the above set
-#                          → runs OCR locally, saves to ~/Documents/scanner-inbox/
+# Captures one duplex batch, cleans up the pages, and delivers the result.
+# Delivery mode is chosen automatically from the environment:
+#   PAPERLESS_URL + PAPERLESS_TOKEN → upload via the Paperless-ngx API
+#   PAPERLESS_CONSUME_DIR           → write to the Paperless consume folder
+#   (neither)                       → OCR locally into ~/Documents/scanner-inbox/
 #
-# Features:
-# - A4 page size with bleed margin for edge-to-edge capture
-# - Duplex (both sides)
-# - Color scan with optional auto-grayscale conversion (COLOR_DETECT)
-# - Auto-skip blank pages (back sides)
-# - Multi-page batch to single PDF
+# For the GUI workflow (single/multi page, NAPS2 target) see `scan-doc`.
 
 set -e
 
-# Scanner device — from env or auto-detect
-if [ -n "$SCANNER_DEVICE" ]; then
-    DEVICE="$SCANNER_DEVICE"
-else
-    DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1)
-fi
-if [ -z "$DEVICE" ]; then
-    echo "Error: ScanSnap iX1300 not found. Is it connected and powered on?"
-    exit 1
-fi
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/scan-lib.sh"
 
-# Determine mode
-if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
-    MODE=paperless-api
-elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
-    MODE=paperless-folder
-else
-    MODE=local
-fi
+DEVICE=$(resolve_device)
 
-# Bleed margin for edge-to-edge capture (avoids cut-off edges)
-BLEED_MM=10
-PAGE_WIDTH_MM=$((210 + BLEED_MM))
-PAGE_HEIGHT_MM=$((297 + BLEED_MM))
-RESOLUTION="${SCAN_RESOLUTION:-300}"
-
-TIMESTAMP=$(date '+%Y-%m-%d-%H%M%S')
 WORKDIR=$(mktemp -d)
-FILENAME="${1:-scan-$TIMESTAMP}"
+trap 'rm -rf "$WORKDIR"' EXIT
 
-cleanup() {
-    rm -rf "$WORKDIR"
-}
-trap cleanup EXIT
+FILENAME="${1:-scan-$(date '+%Y-%m-%d-%H%M%S')}"
 
 echo "Scanning (duplex, color, A4)..."
-scanimage --device "$DEVICE" \
-    --format=tiff \
-    --resolution "$RESOLUTION" \
-    --mode Color \
-    --source "ADF Duplex" \
-    --page-width "$PAGE_WIDTH_MM" \
-    --page-height "$PAGE_HEIGHT_MM" \
-    --swskip 20 \
-    --swcrop=yes \
-    --swdespeck 2 \
-    --overscan On \
-    --prepick On \
-    --buffermode On \
-    --batch="$WORKDIR/page-%04d.tiff" \
-    --batch-count=-1 \
-    2>&1 | grep -v "^$" || true
+scan_batch "$DEVICE" "$WORKDIR/page"
 
-# Count scanned pages
-PAGECOUNT=$(ls -1 "$WORKDIR"/page-*.tiff 2>/dev/null | wc -l)
-
-if [ "$PAGECOUNT" -eq 0 ]; then
-    echo "No pages scanned (feeder empty?)"
+pages=("$WORKDIR"/page-*.tiff)
+if [ ! -e "${pages[0]}" ]; then
+    echo "No pages scanned (feeder empty?)" >&2
     exit 1
 fi
+echo "Scanned ${#pages[@]} page(s)"
 
-echo "Scanned $PAGECOUNT page(s)"
-
-# Auto-detect color vs grayscale for each page (reduces file size)
-# Can be disabled with COLOR_DETECT=false
-if [ "${COLOR_DETECT:-true}" = "true" ]; then
-    echo "Detecting color..."
-    COLOR_PAGES=0
-    GRAY_PAGES=0
-    for tiff in "$WORKDIR"/page-*.tiff; do
-        # Check color saturation - if mean saturation < 10%, convert to grayscale
-        saturation=$(magick "$tiff" -colorspace HSL -channel G -separate +channel -format "%[fx:mean*100]" info: 2>/dev/null || echo "0")
-        if (( $(echo "$saturation < 10" | bc -l) )); then
-            magick "$tiff" -colorspace Gray "$tiff"
-            GRAY_PAGES=$((GRAY_PAGES + 1))
-        else
-            COLOR_PAGES=$((COLOR_PAGES + 1))
-        fi
-    done
-
-    if [ "$GRAY_PAGES" -gt 0 ] && [ "$COLOR_PAGES" -gt 0 ]; then
-        echo "Mixed: $COLOR_PAGES color, $GRAY_PAGES grayscale"
-    elif [ "$GRAY_PAGES" -gt 0 ]; then
-        echo "Converted to grayscale"
-    else
-        echo "Color detected"
-    fi
-else
-    echo "Color detection disabled, converting to grayscale..."
-    for tiff in "$WORKDIR"/page-*.tiff; do
-        magick "$tiff" -colorspace Gray "$tiff"
-    done
-fi
-
-get_page_rotation() {
-    command -v tesseract >/dev/null 2>&1 || return 0
-    tesseract "$1" stdout --psm 0 2>/dev/null \
-        | grep -i 'Rotate:' \
-        | grep -oE '[0-9]+' \
-        | head -1
-}
-
-crop_shave_pixels() {
-    if [ -n "${AUTO_CROP_SHAVE_PX:-}" ]; then
-        echo "$AUTO_CROP_SHAVE_PX"
-        return
-    fi
-    local shave_mm="${AUTO_CROP_SHAVE_MM:-1.5}"
-    echo "scale=0; $RESOLUTION * $shave_mm / 25.4 + 0.5" | bc
-}
-
-enhance_page() {
-    local tiff=$1
-    local tmp="${tiff}.enhancing"
-    local fuzz="${AUTO_CROP_FUZZ:-10%}"
-    local shave_px
-    shave_px=$(crop_shave_pixels)
-
-    if [ "${AUTO_ROTATE:-true}" = "true" ]; then
-        local rotate
-        local -a rotate_args=()
-        rotate=$(get_page_rotation "$tiff")
-        case "$rotate" in
-            90|180|270) rotate_args+=(-rotate "$rotate") ;;
-        esac
-        rotate_args+=(-deskew 40% -background white)
-        magick "$tiff" "${rotate_args[@]}" "$tmp"
-        mv "$tmp" "$tiff"
-    fi
-
-    if [ "${AUTO_CROP:-true}" = "true" ]; then
-        # Shave scanner bed grey first — white-border trim can't remove it
-        magick "$tiff" \
-            -shave "${shave_px}x${shave_px}" \
-            -bordercolor white -border 1 \
-            -fuzz "$fuzz" -trim +repage -shave 1x1 \
-            "$tmp"
-        mv "$tmp" "$tiff"
-    fi
-}
-
-if [ "${AUTO_CROP:-true}" = "true" ] || [ "${AUTO_ROTATE:-true}" = "true" ]; then
-    echo "Enhancing pages..."
-    for tiff in "$WORKDIR"/page-*.tiff; do
-        enhance_page "$tiff"
-    done
-fi
-
-if [ "$MODE" = "paperless-api" ]; then
-    echo "Creating PDF..."
-    magick "$WORKDIR"/page-*.tiff "$WORKDIR/$FILENAME.pdf"
-
-    echo "Uploading to Paperless..."
-    RESPONSE=$(curl -sk -w "\n%{http_code}" \
-        -H "Authorization: Token $PAPERLESS_TOKEN" \
-        -F "document=@$WORKDIR/$FILENAME.pdf" \
-        -F "created=$(date '+%Y-%m-%d')" \
-        "$PAPERLESS_URL/api/documents/post_document/")
-
-    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-    if [ "$HTTP_CODE" -eq 200 ]; then
-        FILESIZE=$(ls -lh "$WORKDIR/$FILENAME.pdf" | awk '{print $5}')
-        echo "Done: $FILENAME.pdf ($PAGECOUNT pages, $FILESIZE) uploaded to Paperless"
-    else
-        echo "Upload failed (HTTP $HTTP_CODE)"
-        BODY=$(echo "$RESPONSE" | sed '$d')
-        [ -n "$BODY" ] && echo "$BODY"
-        exit 1
-    fi
-
-elif [ "$MODE" = "paperless-folder" ]; then
-    OUTFILE="$PAPERLESS_CONSUME_DIR/$FILENAME.pdf"
-
-    echo "Creating PDF..."
-    magick "$WORKDIR"/page-*.tiff "$OUTFILE"
-
-    FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
-    echo "Done: $OUTFILE ($PAGECOUNT pages, $FILESIZE)"
-
-else
-    OUTDIR="$HOME/Documents/scanner-inbox"
-    OUTFILE="$OUTDIR/$FILENAME.pdf"
-    mkdir -p "$OUTDIR"
-
-    echo "Running OCR..."
-    magick "$WORKDIR"/page-*.tiff "$WORKDIR/combined.tiff"
-    ocrmypdf "$WORKDIR/combined.tiff" "$OUTFILE" \
-        -l nld+eng \
-        --clean \
-        -O 3 \
-        --jpeg-quality 60 \
-        --jbig2-lossy
-
-    FILESIZE=$(ls -lh "$OUTFILE" | awk '{print $5}')
-    echo "Done: $OUTFILE ($PAGECOUNT pages, $FILESIZE)"
-fi
+apply_color_detection "${pages[@]}"
+enhance_pages "${pages[@]}"
+deliver_paperless "$FILENAME" "${pages[@]}"
