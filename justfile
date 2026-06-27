@@ -1,4 +1,4 @@
-# ix500-linux — one-button scanning for ScanSnap iX500
+# scansnap-linux — one-button scanning for Fujitsu ScanSnap scanners
 
 # List available recipes
 default:
@@ -32,22 +32,20 @@ install:
         fi
     }
 
-    echo "ix500-linux installer"
-    echo "====================="
+    echo "scansnap-linux installer"
+    echo "========================"
     echo
 
     # --- Mode selection ---
-    echo "Select scanning mode:"
-    echo "  1) Paperless-ngx API     - Upload scans to Paperless via API (recommended)"
-    echo "  2) Paperless-ngx folder  - Write scans to Paperless consume folder"
-    echo "  3) Local                  - OCR locally, save to ~/Documents/scanner-inbox/"
+    echo "Select delivery mode:"
+    echo "  1) Paperless-ngx API  - Upload scans to Paperless via API (recommended)"
+    echo "  2) Folder             - Write the scanned PDF to a folder"
     echo
-    read -rp "Choice [1/2/3]: " MODE_CHOICE
+    read -rp "Choice [1/2]: " MODE_CHOICE
     echo
 
     case "$MODE_CHOICE" in
-        2) MODE=paperless-folder ;;
-        3) MODE=local ;;
+        2) MODE=folder ;;
         *) MODE=paperless-api ;;
     esac
 
@@ -58,19 +56,7 @@ install:
     check_cmd scanimage "sane-backends" || DEPS_OK=false
     check_cmd magick "" || DEPS_OK=false
     check_cmd bc "bc" || DEPS_OK=false
-
-    if [ "$MODE" = "local" ]; then
-        check_cmd ocrmypdf "" || DEPS_OK=false
-        check_cmd tesseract "" || DEPS_OK=false
-        if command -v tesseract &>/dev/null; then
-            if tesseract --list-langs 2>/dev/null | grep -q "^nld$"; then
-                ok "tesseract language: nld"
-            else
-                fail "tesseract language: nld missing"
-                DEPS_OK=false
-            fi
-        fi
-    fi
+    check_cmd tesseract "tesseract" || DEPS_OK=false
 
     if [ "$MODE" = "paperless-api" ]; then
         check_cmd curl "curl" || DEPS_OK=false
@@ -105,7 +91,7 @@ install:
 
     # --- Scanner detection ---
     echo "Detecting scanner..."
-    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1 || true)
+    DETECTED_DEVICE=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap[^']+" | head -1 || true)
 
     if [ -n "$DETECTED_DEVICE" ]; then
         ok "Found: $DETECTED_DEVICE"
@@ -121,42 +107,29 @@ install:
     fi
     echo
 
-    # --- Color detection preference ---
-    echo "Auto color detection converts grayscale pages to reduce file size."
-    read -rp "Enable auto color detection? [Y/n]: " COLOR_CHOICE
-
-    if [ "$COLOR_CHOICE" = "n" ] || [ "$COLOR_CHOICE" = "N" ]; then
-        COLOR_DETECT=false
-    else
-        COLOR_DETECT=true
-    fi
-    echo
+    # Color treatment is chosen per scan in the GUI (Color / Grayscale / Auto);
+    # the headless hardware-button scan always uses Auto.
 
     # --- Load existing settings for defaults ---
     ENV_DIR="$HOME/.config/environment.d"
     ENV_FILE="$ENV_DIR/scanner.conf"
-    OLD_ENV_FILE="$ENV_DIR/paperless.conf"
 
     EXISTING_URL=""
     EXISTING_TOKEN=""
-    EXISTING_CONSUME_DIR=""
+    EXISTING_FOLDER_DIR=""
 
-    # Migrate from old paperless.conf if it exists
-    if [ -f "$OLD_ENV_FILE" ]; then
-        EXISTING_URL=$(grep -oP '(?<=^PAPERLESS_URL=).+' "$OLD_ENV_FILE" 2>/dev/null || true)
-        EXISTING_TOKEN=$(grep -oP '(?<=^PAPERLESS_TOKEN=).+' "$OLD_ENV_FILE" 2>/dev/null || true)
-    fi
-    # Also check existing scanner.conf
     if [ -f "$ENV_FILE" ]; then
-        [ -z "$EXISTING_URL" ] && EXISTING_URL=$(grep -oP '(?<=^PAPERLESS_URL=).+' "$ENV_FILE" 2>/dev/null || true)
-        [ -z "$EXISTING_TOKEN" ] && EXISTING_TOKEN=$(grep -oP '(?<=^PAPERLESS_TOKEN=).+' "$ENV_FILE" 2>/dev/null || true)
-        EXISTING_CONSUME_DIR=$(grep -oP '(?<=^PAPERLESS_CONSUME_DIR=).+' "$ENV_FILE" 2>/dev/null || true)
+        EXISTING_URL=$(grep -oP '(?<=^PAPERLESS_URL=).+' "$ENV_FILE" 2>/dev/null || true)
+        EXISTING_TOKEN=$(grep -oP '(?<=^PAPERLESS_TOKEN=).+' "$ENV_FILE" 2>/dev/null || true)
+        EXISTING_FOLDER_DIR=$(grep -oP '(?<=^FOLDER_DIR=).+' "$ENV_FILE" 2>/dev/null || true)
+        # Fall back to the pre-rebrand variable name for the folder path.
+        [ -z "$EXISTING_FOLDER_DIR" ] && EXISTING_FOLDER_DIR=$(grep -oP '(?<=^PAPERLESS_CONSUME_DIR=).+' "$ENV_FILE" 2>/dev/null || true)
     fi
 
     # --- Mode-specific configuration ---
     PAPERLESS_URL=""
     PAPERLESS_TOKEN=""
-    PAPERLESS_CONSUME_DIR=""
+    FOLDER_DIR=""
 
     if [ "$MODE" = "paperless-api" ]; then
         echo "Paperless-ngx API configuration:"
@@ -192,23 +165,23 @@ install:
         fi
         echo
 
-    elif [ "$MODE" = "paperless-folder" ]; then
-        echo "Paperless-ngx consume folder configuration:"
+    elif [ "$MODE" = "folder" ]; then
+        echo "Folder mode configuration:"
 
-        if [ -n "$EXISTING_CONSUME_DIR" ]; then
-            read -rp "  Consume folder [$EXISTING_CONSUME_DIR]: " PAPERLESS_CONSUME_DIR
-            PAPERLESS_CONSUME_DIR="${PAPERLESS_CONSUME_DIR:-$EXISTING_CONSUME_DIR}"
+        if [ -n "$EXISTING_FOLDER_DIR" ]; then
+            read -rp "  Output folder [$EXISTING_FOLDER_DIR]: " FOLDER_DIR
+            FOLDER_DIR="${FOLDER_DIR:-$EXISTING_FOLDER_DIR}"
         else
-            read -rp "  Consume folder (e.g. /mnt/paperless-consume): " PAPERLESS_CONSUME_DIR
+            read -rp "  Output folder (e.g. /mnt/scans): " FOLDER_DIR
         fi
 
-        if [ -z "$PAPERLESS_CONSUME_DIR" ]; then
-            echo "Error: Consume folder path is required for Paperless folder mode"
+        if [ -z "$FOLDER_DIR" ]; then
+            echo "Error: an output folder is required for folder mode"
             exit 1
         fi
 
-        if [ ! -d "$PAPERLESS_CONSUME_DIR" ]; then
-            warn "Directory $PAPERLESS_CONSUME_DIR does not exist (make sure it's available at scan time)"
+        if [ ! -d "$FOLDER_DIR" ]; then
+            warn "Directory $FOLDER_DIR does not exist (make sure it's available at scan time)"
         else
             ok "Directory exists"
         fi
@@ -218,23 +191,16 @@ install:
     # --- Write config file ---
     mkdir -p "$ENV_DIR"
     {
-        echo "# Scanner configuration for ix500-linux"
+        echo "# Scanner configuration for scansnap-linux"
         echo "SCANNER_DEVICE=$SCANNER_DEVICE"
-        echo "COLOR_DETECT=$COLOR_DETECT"
         if [ "$MODE" = "paperless-api" ]; then
             echo "PAPERLESS_URL=$PAPERLESS_URL"
             echo "PAPERLESS_TOKEN=$PAPERLESS_TOKEN"
-        elif [ "$MODE" = "paperless-folder" ]; then
-            echo "PAPERLESS_CONSUME_DIR=$PAPERLESS_CONSUME_DIR"
+        elif [ "$MODE" = "folder" ]; then
+            echo "FOLDER_DIR=$FOLDER_DIR"
         fi
     } > "$ENV_FILE"
     ok "Saved settings to $ENV_FILE"
-
-    # Remove old paperless.conf if it exists
-    if [ -f "$OLD_ENV_FILE" ]; then
-        rm "$OLD_ENV_FILE"
-        ok "Migrated from paperless.conf → scanner.conf"
-    fi
     echo
 
     # --- Install files ---
@@ -261,7 +227,7 @@ install:
 
     echo
     echo "Installing udev rules (requires sudo)..."
-    sudo cp "$SCRIPT_DIR/99-scansnap-ix500.rules" /etc/udev/rules.d/
+    sudo cp "$SCRIPT_DIR/99-scansnap.rules" /etc/udev/rules.d/
     ok "Udev rules installed"
 
     # --- Activate ---
@@ -269,11 +235,11 @@ install:
     echo "Activating..."
 
     # Load all env vars into current systemd session
-    ENV_VARS=(SCANNER_DEVICE="$SCANNER_DEVICE" COLOR_DETECT="$COLOR_DETECT")
+    ENV_VARS=(SCANNER_DEVICE="$SCANNER_DEVICE")
     if [ "$MODE" = "paperless-api" ]; then
         ENV_VARS+=(PAPERLESS_URL="$PAPERLESS_URL" PAPERLESS_TOKEN="$PAPERLESS_TOKEN")
-    elif [ "$MODE" = "paperless-folder" ]; then
-        ENV_VARS+=(PAPERLESS_CONSUME_DIR="$PAPERLESS_CONSUME_DIR")
+    elif [ "$MODE" = "folder" ]; then
+        ENV_VARS+=(FOLDER_DIR="$FOLDER_DIR")
     fi
     systemctl --user set-environment "${ENV_VARS[@]}"
 
@@ -289,9 +255,8 @@ install:
     echo
     echo "Installation complete!"
     case "$MODE" in
-        paperless-api)    echo "Scans will be uploaded to Paperless at $PAPERLESS_URL" ;;
-        paperless-folder) echo "Scans will be saved to $PAPERLESS_CONSUME_DIR" ;;
-        local)            echo "Scans will be saved to ~/Documents/scanner-inbox/" ;;
+        paperless-api) echo "Scans will be uploaded to Paperless at $PAPERLESS_URL" ;;
+        folder)        echo "Scans will be saved to $FOLDER_DIR" ;;
     esac
 
 # Check dependencies for all modes
@@ -320,6 +285,7 @@ check:
     check_cmd scanimage
     check_cmd magick
     check_cmd bc
+    check_cmd tesseract
 
     echo
     echo "Notification dependencies:"
@@ -341,19 +307,6 @@ check:
     echo
     echo "Paperless API mode:"
     check_cmd curl
-
-    echo
-    echo "Local mode:"
-    check_cmd ocrmypdf
-    check_cmd tesseract
-    if command -v tesseract &>/dev/null; then
-        if tesseract --list-langs 2>/dev/null | grep -q "^nld$"; then
-            ok "tesseract language: nld"
-        else
-            fail "tesseract language: nld missing"
-            ALL_OK=false
-        fi
-    fi
 
     echo
     if [ "$ALL_OK" = true ]; then
@@ -413,7 +366,7 @@ uninstall:
     NC='\033[0m'
     ok() { echo -e "  ${GREEN}✓${NC} $1"; }
 
-    echo "Uninstalling ix500-linux..."
+    echo "Uninstalling scansnap-linux..."
     echo
 
     # Stop and disable service
@@ -437,7 +390,7 @@ uninstall:
     # Remove udev rules
     echo
     echo "Removing udev rules (requires sudo)..."
-    sudo rm -f /etc/udev/rules.d/99-scansnap-ix500.rules
+    sudo rm -f /etc/udev/rules.d/99-scansnap.rules /etc/udev/rules.d/99-scansnap-ix500.rules
     ok "Udev rules removed"
 
     # Reload

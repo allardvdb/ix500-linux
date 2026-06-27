@@ -6,10 +6,10 @@
 # user wants, then finalizes once to deliver a single combined PDF.
 #
 # Usage:
-#   scan-doc capture  <workdir>
+#   scan-doc capture  <workdir> [--color color|gray|auto]
 #       Scan one duplex batch into <workdir>, cleaning up the new pages.
 #       Prints the number of pages added. Exits non-zero if the feeder
-#       was empty.
+#       was empty. Color treatment defaults to auto.
 #
 #   scan-doc finalize <workdir> --target paperless|naps2 [--name NAME]
 #       Combine every captured page into one PDF, deliver it, and remove
@@ -33,7 +33,17 @@ next_batch_prefix() {
 
 capture() {
     local workdir=$1
+    shift
     [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
+
+    local color="auto"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --color) color=$2; shift 2 ;;
+            *) echo "Unknown capture option: $1" >&2; exit 1 ;;
+        esac
+    done
+    export COLOR_MODE="$color"
 
     local device prefix
     device=$(resolve_device)
@@ -52,7 +62,7 @@ capture() {
     fi
     echo "Scanned ${#new_pages[@]} page(s)"
 
-    apply_color_detection "${new_pages[@]}"
+    apply_color_mode "${new_pages[@]}"
     enhance_pages "${new_pages[@]}"
 }
 
@@ -82,7 +92,7 @@ finalize() {
     echo "Finalizing ${#pages[@]} page(s)..."
 
     case "$target" in
-        paperless) deliver_paperless "$name" "${pages[@]}" ;;
+        paperless) deliver_document "$name" "${pages[@]}" ;;
         naps2)     deliver_naps2 "$name" "${pages[@]}" ;;
         *) echo "Unknown or missing --target (expected paperless|naps2)" >&2; exit 1 ;;
     esac
@@ -95,7 +105,7 @@ case "$COMMAND" in
     capture)  shift; capture "$@" ;;
     finalize) shift; finalize "$@" ;;
     *)
-        echo "Usage: scan-doc {capture <workdir> | finalize <workdir> --target paperless|naps2 [--name NAME]}" >&2
+        echo "Usage: scan-doc {capture <workdir> [--color color|gray|auto] | finalize <workdir> --target paperless|naps2 [--name NAME]}" >&2
         exit 1
         ;;
 esac

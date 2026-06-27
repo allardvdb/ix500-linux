@@ -1,13 +1,14 @@
 #!/bin/bash
-# scan - One-button scan from the ScanSnap iX1300 to Paperless (or local OCR).
+# scan - One-button scan from a Fujitsu ScanSnap to the configured destination.
 #
 # Captures one duplex batch, cleans up the pages, and delivers the result.
 # Delivery mode is chosen automatically from the environment:
 #   PAPERLESS_URL + PAPERLESS_TOKEN → upload via the Paperless-ngx API
-#   PAPERLESS_CONSUME_DIR           → write to the Paperless consume folder
-#   (neither)                       → OCR locally into ~/Documents/scanner-inbox/
+#   FOLDER_DIR                      → write the PDF to that folder
+# Color treatment defaults to auto (per-page color/grayscale detection).
 #
-# For the GUI workflow (single/multi page, NAPS2 target) see `scan-doc`.
+# For the GUI workflow (single/multi page, color choice, NAPS2 target) see
+# `scan-doc`.
 
 set -e
 
@@ -34,6 +35,6 @@ if [ ! -e "${pages[0]}" ]; then
 fi
 echo "Scanned ${#pages[@]} page(s)"
 
-apply_color_detection "${pages[@]}"
+apply_color_mode "${pages[@]}"
 enhance_pages "${pages[@]}"
-deliver_paperless "$FILENAME" "${pages[@]}"
+deliver_document "$FILENAME" "${pages[@]}"

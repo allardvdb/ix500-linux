@@ -1,40 +1,38 @@
-# ix500-linux
+# scansnap-linux
 
-One-button scanning workflow for [Fujitsu ScanSnap iX500](https://www.fujitsu.com/global/products/computing/peripheral/scanners/scansnap/ix500/) on Linux.
+One-button scanning workflow for [Fujitsu ScanSnap](https://www.pfu.ricoh.com/global/scanners/scansnap/) scanners on Linux. Should work with any ScanSnap the SANE `fujitsu` backend exposes as `fujitsu:ScanSnap …`; only tested with the iX1300 so far.
 
 Press the scanner button → get a PDF. That's it.
 
 ## Features
 
 - **One-button scanning** - press the hardware button, get a PDF
-- **Desktop GUI** - pick single/multi page and Paperless/NAPS2, then scan
+- **Desktop GUI** - pick pages, color, and destination, then scan
 - **Button follows the GUI** - when the GUI is open the hardware button uses its current selection (and adds the next page in multi-page mode); when it's closed the button scans a single page to Paperless
 - **Feeder or front slot** - automatically scans from whichever input has a document loaded
 - **Multi-page documents** - keep scanning pages and combine them into one PDF
-- **Duplex A4 color** - scans both sides automatically
+- **Duplex A4** - scans both sides automatically
 - **Smart blank detection** - skips empty back pages (20% threshold)
-- **Auto color/grayscale** - converts B&W pages to grayscale for smaller files
-- **Three output modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) via API, write to a Paperless consume folder, or save locally with OCR
+- **Color / Grayscale / Auto** - keep color, force grayscale, or auto-detect per page
+- **Two delivery modes** - upload to [Paperless-ngx](https://docs.paperless-ngx.com/) via API, or write the PDF to a folder
 - **Send to NAPS2** - hand the finished PDF to the [NAPS2](https://www.naps2.com/) desktop app
 - **Clickable notifications** - open the result directly from the notification
 - **Robust disconnect handling** - no crashes when scanner is unplugged
 
 ### Desktop GUI
-Run `just gui` (or launch **ScanSnap Scan** from your app menu). The window has two choices:
+Run `just gui` (or launch **ScanSnap Scan** from your app menu). The window has three choices:
 
 - **Pages** — *Scan single page* (one scan session) or *Scan multi page* (keep loading pages; each page is appended and everything is combined into one PDF).
-- **Send to** — *Send to Paperless* (uses the configured Paperless/local pipeline) or *Send to NAPS2* (opens the finished PDF in NAPS2 for review/editing).
+- **Color** — *Color* (keep every page in color), *Grayscale* (force grayscale), or *Auto* (detect per page).
+- **Send to** — *Send to Paperless* (uses the configured Paperless API or folder pipeline) or *Send to NAPS2* (opens the finished PDF in NAPS2 for review/editing).
 
 Press **Scan** (on screen or the hardware button). In multi-page mode the Scan button becomes **Scan next page** and a **Finish** button appears after each page; the hardware button adds the next page too, so you can keep loading pages without touching the keyboard. Pages can come from either the feeder or the front slot, and you can switch between them between pages.
 
 ### Paperless-ngx API mode (recommended)
 When `PAPERLESS_URL` and `PAPERLESS_TOKEN` are set, scans are uploaded directly to Paperless-ngx via its API. Paperless handles OCR, archiving, compression, and search.
 
-### Paperless-ngx folder mode
-When `PAPERLESS_CONSUME_DIR` is set, scans are written directly to the Paperless consume folder. Paperless picks them up from there.
-
-### Local mode
-Without Paperless configured, scans are processed locally with ocrmypdf (Dutch + English OCR, auto-rotate, deskew, cleanup) and saved to `~/Documents/scanner-inbox/`.
+### Folder mode
+When `FOLDER_DIR` is set, the finished PDF is written to that folder. Point it at a Paperless consume folder, a synced directory, or anywhere else you like.
 
 ## Requirements
 
@@ -42,15 +40,12 @@ Without Paperless configured, scans are processed locally with ocrmypdf (Dutch +
 - **sane-backends** (`scanimage`) - scanner driver
 - **ImageMagick** (`magick`) - image processing and PDF creation
 - **bc** - floating point math for color detection
+- **tesseract** - page orientation detection (auto-rotate before PDF)
 - **libnotify** (`notify-send`), **xdg-utils** (`xdg-open`), **xdg-terminal-exec** - desktop notifications
 
 GUI only:
 - **python3** with **PyGObject** and **GTK 4** - the desktop window
 - **NAPS2** (`naps2`) - target for "Send to NAPS2"
-
-Local mode only:
-- **ocrmypdf** - OCR and PDF creation
-- **tesseract** with `nld` and `eng` language data
 
 Paperless API mode only:
 - **curl** - API upload
@@ -70,7 +65,7 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 ### One-button scanning
 1. Put documents in the feeder or the front slot
 2. Press the blue Scan button on the scanner
-3. With the GUI closed this scans a single page to Paperless; with the GUI open it uses the window's current selection
+3. With the GUI closed this scans a single page (auto color) to the configured destination; with the GUI open it uses the window's current selection
 4. Wait for desktop notification "Scan Complete" (headless scans)
 5. Click the notification to open the result
 
@@ -78,7 +73,7 @@ The interactive installer detects the scanner, asks for mode and preferences, co
 ```bash
 just gui       # Launch the scan window (or use the "ScanSnap Scan" app entry)
 ```
-Pick single/multi page and Paperless/NAPS2, then press Scan.
+Pick pages, color, and destination, then press Scan.
 
 ### Manual scanning
 ```bash
@@ -101,11 +96,12 @@ Settings are stored in `~/.config/environment.d/scanner.conf` (managed by `just 
 
 | Variable | Description |
 |---|---|
-| `SCANNER_DEVICE` | SANE device string (auto-detected if unset) |
-| `COLOR_DETECT` | `true` (default) or `false` — auto-detect color vs grayscale per page |
+| `SCANNER_DEVICE` | SANE device string (auto-detected if unset; matches `fujitsu:ScanSnap …`) |
 | `PAPERLESS_URL` | Paperless-ngx base URL (API mode) |
 | `PAPERLESS_TOKEN` | Paperless-ngx API token (API mode) |
-| `PAPERLESS_CONSUME_DIR` | Path to Paperless consume folder (folder mode) |
+| `FOLDER_DIR` | Output folder for the PDF (folder mode) |
+
+Color treatment is not stored in config — it's chosen per scan in the GUI (Color / Grayscale / Auto). The headless hardware-button scan always uses Auto. `COLOR_MODE=color|gray|auto` can override it for the `scan`/`scan-doc` scripts.
 
 ### Scanner options (in `scan`)
 
@@ -118,18 +114,10 @@ Settings are stored in `~/.config/environment.d/scanner.conf` (managed by `just 
 | `--prepick` | On | Pre-pick next page (faster) |
 | `--buffermode` | On | Faster processing |
 
-### OCR options (local mode only, in `scan`)
-
-| Option | Value | Purpose |
-|--------|-------|---------|
-| `-l` | nld+eng | Languages (Dutch + English) |
-| `--rotate-pages-threshold` | 2 | Aggressive rotation fix |
-| `-O` | 3 | Maximum optimization |
-| `--jpeg-quality` | 60 | Good compression |
-| `--jbig2-lossy` | yes | Better text compression |
-
-### Color detection
-Pages with <10% color saturation are converted to grayscale automatically.
+### Color mode
+- **Color** — every page kept in color.
+- **Grayscale** — every page converted to grayscale.
+- **Auto** — pages with <10% color saturation are converted to grayscale automatically (smaller files).
 
 ## How it works
 
@@ -143,29 +131,28 @@ Pages with <10% color saturation are converted to grayscale automatically.
                     ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
 │  scanimage  │────▶│ ImageMagick  │────▶│ Paperless API / │
-│  (SANE)     │     │ (PDF)        │     │ folder / OCR    │
+│  (SANE)     │     │ (PDF)        │     │ folder          │
 └─────────────┘     └──────────────┘     └─────────────────┘
 ```
 
-1. **Button poll service** checks scanner button every 100ms
-2. **scanimage** captures duplex color TIFF pages
-3. **ImageMagick** combines pages, detects color vs grayscale, creates PDF
-4. Delivery: **Paperless API** upload, **Paperless folder** write, or local **ocrmypdf**
+1. **Button poll service** checks the scanner button every 100ms (forwards to the GUI when it's open)
+2. **scanimage** captures duplex TIFF pages from the loaded input (feeder or front slot)
+3. **ImageMagick** applies the color mode, deskews/crops, and combines pages into a PDF
+4. Delivery: **Paperless API** upload, or **folder** write
 5. **Clickable notification** confirms completion
 
 ## Tested on
 
-- **OS**: [Bluefin](https://projectbluefin.io/) (Fedora Silverblue based)
-- **Scanner**: Fujitsu ScanSnap iX500
+- **OS**: Arch Linux
+- **Scanner**: Fujitsu ScanSnap iX1300
 - **SANE**: sane-backends with fujitsu driver
 
-Should work on any Linux with SANE support for the iX500.
+Other ScanSnap models that show up as `fujitsu:ScanSnap …` in `scanimage -L` should work, but have not been tested here.
 
 ## Credits
 
 - [Rida Ayed's ix500 Linux guide](https://ridaayed.com/posts/setup_fujitsu_ix500_scanner_linux/) - scanner options and swskip threshold
 - [foxey/scanbdScanSnapIntegration](https://github.com/foxey/scanbdScanSnapIntegration) - inspiration for button daemon
-- [OCRmyPDF](https://ocrmypdf.readthedocs.io/) - excellent OCR tool
 
 ## License
 

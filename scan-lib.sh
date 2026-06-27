@@ -1,5 +1,5 @@
 #!/bin/bash
-# scan-lib.sh - Shared scanning routines for the ScanSnap iX1300.
+# scan-lib.sh - Shared scanning routines for Fujitsu ScanSnap scanners.
 #
 # Sourced by `scan` (one-button workflow) and `scan-doc` (GUI workflow).
 # Each function does one focused thing: find the scanner, capture a batch,
@@ -26,16 +26,20 @@ with_scan_lock() {
     { flock -w "$timeout" 200 || return 1; "$@"; } 200>"$SCAN_LOCK"
 }
 
+# SANE device pattern matching any Fujitsu ScanSnap model (iX500, iX1300,
+# iX1600, S1500, ...). Used by every script that looks the scanner up.
+SCANSNAP_DEVICE_RE="fujitsu:ScanSnap[^']+"
+
 # Echo the SANE device string, or exit 1 if no scanner is found.
 resolve_device() {
     local device
     if [ -n "$SCANNER_DEVICE" ]; then
         device="$SCANNER_DEVICE"
     else
-        device=$(scanimage -L 2>/dev/null | grep -oP "fujitsu:ScanSnap iX1300:\d+" | head -1)
+        device=$(scanimage -L 2>/dev/null | grep -oP "$SCANSNAP_DEVICE_RE" | head -1)
     fi
     if [ -z "$device" ]; then
-        echo "Error: ScanSnap iX1300 not found. Is it connected and powered on?" >&2
+        echo "Error: no ScanSnap scanner found. Is it connected and powered on?" >&2
         return 1
     fi
     echo "$device"
@@ -80,14 +84,17 @@ scan_pages() {
     scan_batch "$device" "$source" "$prefix"
 }
 
-# Echo which Paperless delivery mode the environment selects.
-paperless_mode() {
+# Echo which delivery mode the environment selects:
+#   paperless  - upload to Paperless-ngx (PAPERLESS_URL + PAPERLESS_TOKEN)
+#   folder     - write the PDF to a folder (FOLDER_DIR)
+#   none       - nothing configured
+delivery_mode() {
     if [ -n "$PAPERLESS_URL" ] && [ -n "$PAPERLESS_TOKEN" ]; then
-        echo paperless-api
-    elif [ -n "$PAPERLESS_CONSUME_DIR" ]; then
-        echo paperless-folder
+        echo paperless
+    elif [ -n "$FOLDER_DIR" ]; then
+        echo folder
     else
-        echo local
+        echo none
     fi
 }
 
@@ -113,20 +120,34 @@ scan_batch() {
         2>&1 | grep -v "^$" || true
 }
 
-# Convert near-monochrome pages to grayscale to shrink the output.
-# Honours COLOR_DETECT (default true); when false, force grayscale.
-apply_color_detection() {
+# Apply the chosen color treatment to the pages. COLOR_MODE selects:
+#   color - keep every page in color (no conversion)
+#   gray  - force every page to grayscale
+#   auto  - convert near-monochrome pages to grayscale per page (default)
+apply_color_mode() {
     local tiffs=("$@")
+    local mode="${COLOR_MODE:-auto}"
 
-    if [ "${COLOR_DETECT:-true}" != "true" ]; then
-        echo "Color detection disabled, converting to grayscale..."
-        local tiff
-        for tiff in "${tiffs[@]}"; do
-            magick "$tiff" -colorspace Gray "$tiff"
-        done
-        return
-    fi
+    case "$mode" in
+        color)
+            echo "Color mode: keeping pages in color."
+            ;;
+        gray)
+            echo "Color mode: converting all pages to grayscale..."
+            local tiff
+            for tiff in "${tiffs[@]}"; do
+                magick "$tiff" -colorspace Gray "$tiff"
+            done
+            ;;
+        *)
+            _detect_color_per_page "${tiffs[@]}"
+            ;;
+    esac
+}
 
+# Auto mode: grayscale any page whose color saturation is below threshold.
+_detect_color_per_page() {
+    local tiffs=("$@")
     echo "Detecting color..."
     local color_pages=0 gray_pages=0 tiff saturation
     for tiff in "${tiffs[@]}"; do
@@ -150,6 +171,7 @@ apply_color_detection() {
 }
 
 # Detect the upright orientation of a page via tesseract (0/90/180/270).
+# Used for every delivery mode, not just Paperless or folder.
 _page_rotation() {
     command -v tesseract >/dev/null 2>&1 || return 0
     tesseract "$1" stdout --psm 0 2>/dev/null \
@@ -186,6 +208,9 @@ _enhance_page() {
         rotate_args+=(-deskew 40% -background white)
         magick "$tiff" "${rotate_args[@]}" "$tmp"
         mv "$tmp" "$tiff"
+    elif [ "${AUTO_DESKEW:-true}" = "true" ]; then
+        magick "$tiff" -deskew 40% -background white "$tmp"
+        mv "$tmp" "$tiff"
     fi
 
     if [ "${AUTO_CROP:-true}" = "true" ]; then
@@ -198,10 +223,12 @@ _enhance_page() {
     fi
 }
 
-# Enhance a list of pages, unless both rotate and crop are disabled.
+# Enhance a list of pages, unless rotate, deskew, and crop are all disabled.
 enhance_pages() {
     local tiffs=("$@")
-    if [ "${AUTO_CROP:-true}" != "true" ] && [ "${AUTO_ROTATE:-true}" != "true" ]; then
+    if [ "${AUTO_CROP:-true}" != "true" ] \
+            && [ "${AUTO_ROTATE:-true}" != "true" ] \
+            && [ "${AUTO_DESKEW:-true}" != "true" ]; then
         return
     fi
     echo "Enhancing pages..."
@@ -218,20 +245,23 @@ build_pdf() {
     magick "$@" "$outpdf"
 }
 
-# Deliver processed pages to Paperless (API or consume folder) or, when
-# Paperless is not configured, OCR locally into ~/Documents/scanner-inbox/.
-deliver_paperless() {
+# Deliver processed pages via the configured mode: upload to Paperless-ngx
+# or write the PDF to a folder.
+deliver_document() {
     local name=$1
     shift
     local tiffs=("$@")
     local pagecount=${#tiffs[@]}
     local mode
-    mode=$(paperless_mode)
+    mode=$(delivery_mode)
 
     case "$mode" in
-        paperless-api)    _deliver_paperless_api "$name" "$pagecount" "${tiffs[@]}" ;;
-        paperless-folder) _deliver_paperless_folder "$name" "$pagecount" "${tiffs[@]}" ;;
-        local)            _deliver_local "$name" "$pagecount" "${tiffs[@]}" ;;
+        paperless) _deliver_paperless_api "$name" "$pagecount" "${tiffs[@]}" ;;
+        folder)    _deliver_folder "$name" "$pagecount" "${tiffs[@]}" ;;
+        none)
+            echo "Error: no delivery configured. Set PAPERLESS_URL+PAPERLESS_TOKEN or FOLDER_DIR." >&2
+            return 1
+            ;;
     esac
 }
 
@@ -267,37 +297,14 @@ _deliver_paperless_api() {
     fi
 }
 
-_deliver_paperless_folder() {
+_deliver_folder() {
     local name=$1 pagecount=$2
     shift 2
-    local outfile="$PAPERLESS_CONSUME_DIR/$name.pdf"
+    mkdir -p "$FOLDER_DIR"
+    local outfile="$FOLDER_DIR/$name.pdf"
 
     echo "Creating PDF..."
     build_pdf "$outfile" "$@"
-
-    local filesize
-    filesize=$(ls -lh "$outfile" | awk '{print $5}')
-    echo "Done: $outfile ($pagecount pages, $filesize)"
-}
-
-_deliver_local() {
-    local name=$1 pagecount=$2
-    shift 2
-    local outdir="$HOME/Documents/scanner-inbox"
-    local outfile="$outdir/$name.pdf"
-    local workdir
-    workdir=$(mktemp -d)
-    mkdir -p "$outdir"
-
-    echo "Running OCR..."
-    build_pdf "$workdir/combined.tiff" "$@"
-    ocrmypdf "$workdir/combined.tiff" "$outfile" \
-        -l nld+eng \
-        --clean \
-        -O 3 \
-        --jpeg-quality 60 \
-        --jbig2-lossy
-    rm -rf "$workdir"
 
     local filesize
     filesize=$(ls -lh "$outfile" | awk '{print $5}')

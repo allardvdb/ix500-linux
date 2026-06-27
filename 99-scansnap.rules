@@ -1,0 +1,15 @@
+# Fujitsu ScanSnap button polling service
+# Start on connect, stop on disconnect
+#
+# Matches any PFU/Fujitsu ScanSnap (USB vendor 04c5) so the same rule works
+# across models (iX500, iX1300, iX1600, S1500, ...).
+#
+# Note: The remove action uses a workaround. If it doesn't work on your system,
+# the service will handle disconnects gracefully by waiting and retrying.
+
+# On connect - start the button polling service for the logged-in user
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="scan-button.service"
+
+# On disconnect - the service handles this gracefully (waits and retries)
+# Uncomment and adjust username if you want explicit stop:
+# ACTION=="remove", SUBSYSTEM=="usb", ENV{ID_VENDOR_ID}=="04c5", RUN+="/usr/bin/systemctl --user --machine=YOUR_USERNAME@ stop scan-button.service"

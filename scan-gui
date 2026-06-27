@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""scan-gui - Minimal desktop front-end for the ScanSnap iX1300.
+"""scan-gui - Minimal desktop front-end for Fujitsu ScanSnap scanners.
 
-Two choices, then scan:
+Three choices, then scan:
 
   Pages    Single page - one scan session becomes the document.
            Multi page  - keep scanning pages; they combine into one PDF.
 
-  Send to  Paperless   - deliver through the configured Paperless/local pipeline.
+  Color    Color       - keep every page in color.
+           Grayscale   - convert every page to grayscale.
+           Auto        - detect color vs grayscale per page.
+
+  Send to  Paperless   - deliver through the configured Paperless/folder pipeline.
            NAPS2       - open the finished PDF in the NAPS2 desktop app.
 
 A scan is triggered either by the on-screen button or by the hardware scanner
@@ -16,7 +20,7 @@ scanner button does exactly what pressing the on-screen button would: start a
 scan when idle, or add the next page while a multi-page document is in flow.
 
 All scanning is done by the `scan-doc` shell script; this file is only the
-window, the two choices, and the flow between scan pages.
+window, the choices, and the flow between scan pages.
 """
 
 import os
@@ -47,8 +51,8 @@ class ScanDoc:
         self.workdir = tempfile.mkdtemp(prefix="scan-gui-")
         self.pages = 0
 
-    def capture(self):
-        result = _run([SCAN_DOC, "capture", self.workdir])
+    def capture(self, color_mode):
+        result = _run([SCAN_DOC, "capture", self.workdir, "--color", color_mode])
         if result.ok:
             self.pages += 1
         return result
@@ -91,11 +95,17 @@ class ScanWindow(Gtk.ApplicationWindow):
         self.doc = None
         self.state = STATE_IDLE
 
-        self.page_single, self.page_multi = self._build_choice_section(
+        self._page_frame, (self.page_single, self.page_multi) = self._build_choice_section(
             "Pages",
             [("Scan single page", True), ("Scan multi page", False)],
         )
-        self.send_paperless, self.send_naps2 = self._build_choice_section(
+        self._color_frame, (self.color_color, self.color_gray, self.color_auto) = (
+            self._build_choice_section(
+                "Color",
+                [("Color", False), ("Grayscale", False), ("Auto", True)],
+            )
+        )
+        self._send_frame, (self.send_paperless, self.send_naps2) = self._build_choice_section(
             "Send to",
             [("Send to Paperless", True), ("Send to NAPS2", False)],
         )
@@ -122,12 +132,14 @@ class ScanWindow(Gtk.ApplicationWindow):
         root.set_margin_start(16)
         root.set_margin_end(16)
         root.append(self._page_frame)
+        root.append(self._color_frame)
         root.append(self._send_frame)
         root.append(buttons)
         root.append(self.status)
         self.set_child(root)
 
     def _build_choice_section(self, title, options):
+        """Build a titled frame of radio buttons. Returns (frame, buttons)."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_top(8)
         box.set_margin_bottom(8)
@@ -148,11 +160,7 @@ class ScanWindow(Gtk.ApplicationWindow):
 
         frame = Gtk.Frame(label=title)
         frame.set_child(box)
-        if title == "Pages":
-            self._page_frame = frame
-        else:
-            self._send_frame = frame
-        return buttons
+        return frame, buttons
 
     # --- Scan flow -------------------------------------------------------
 
@@ -167,9 +175,17 @@ class ScanWindow(Gtk.ApplicationWindow):
         elif self.state == STATE_AWAITING_NEXT:
             self._capture()
 
+    def _color_mode(self):
+        if self.color_color.get_active():
+            return "color"
+        if self.color_gray.get_active():
+            return "gray"
+        return "auto"
+
     def _capture(self):
         self._set_busy("Scanning...")
-        run_async(self.doc.capture, self.on_capture_done)
+        color_mode = self._color_mode()
+        run_async(lambda: self.doc.capture(color_mode), self.on_capture_done)
 
     def on_capture_done(self, result):
         if not result.ok and self.doc.pages == 0:
@@ -190,6 +206,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         self.scan_button.set_sensitive(True)
         self.finish_button.set_visible(True)
         self.finish_button.set_sensitive(True)
+        self._color_frame.set_sensitive(True)
         self._send_frame.set_sensitive(True)
         self.status.set_text(
             f"Scanned {self.doc.pages} page(s). Load the next page, then Scan."
@@ -216,6 +233,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         self.scan_button.set_sensitive(False)
         self.finish_button.set_sensitive(False)
         self._page_frame.set_sensitive(False)
+        self._color_frame.set_sensitive(False)
         self._send_frame.set_sensitive(False)
 
     def _set_idle(self):
@@ -224,6 +242,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         self.scan_button.set_sensitive(True)
         self.finish_button.set_visible(False)
         self._page_frame.set_sensitive(True)
+        self._color_frame.set_sensitive(True)
         self._send_frame.set_sensitive(True)
 
     def _fail(self, summary, detail):
@@ -247,7 +266,7 @@ def _last_line(text):
 class ScanApp(Gtk.Application):
     def __init__(self):
         super().__init__(
-            application_id="com.github.ix500linux.ScanGui",
+            application_id="com.github.scansnaplinux.ScanGui",
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
         self.add_main_option(

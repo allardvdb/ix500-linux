@@ -2,7 +2,7 @@
 Type=Application
 Version=1.0
 Name=ScanSnap Scan
-Comment=Scan to Paperless or NAPS2 with the ScanSnap iX1300
+Comment=Scan to Paperless, a folder, or NAPS2 with a Fujitsu ScanSnap
 Exec=scan-gui
 Icon=scanner
 Terminal=false
