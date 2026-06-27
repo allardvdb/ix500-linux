@@ -12,6 +12,20 @@ PAGE_WIDTH_MM=$((210 + BLEED_MM))
 PAGE_HEIGHT_MM=$((297 + BLEED_MM))
 RESOLUTION="${SCAN_RESOLUTION:-300}"
 
+# Serialize access to the SANE device. The button poller and scan scripts share
+# this lock so scanimage calls never fight each other.
+SCAN_LOCK="/run/user/$(id -u)/scansnap.lock"
+
+# Run a command with exclusive scanner access. Waits up to SCAN_LOCK_TIMEOUT
+# seconds (default 120) before giving up. Uses a scoped file descriptor so
+# shell functions work and the lock fd is not left open after the command.
+with_scan_lock() {
+    local timeout=${SCAN_LOCK_TIMEOUT:-120}
+    mkdir -p "$(dirname "$SCAN_LOCK")"
+    touch "$SCAN_LOCK" 2>/dev/null || true
+    { flock -w "$timeout" 200 || return 1; "$@"; } 200>"$SCAN_LOCK"
+}
+
 # Echo the SANE device string, or exit 1 if no scanner is found.
 resolve_device() {
     local device
@@ -36,7 +50,11 @@ resolve_device() {
 resolve_source() {
     local device=$1
     local options feeder front
-    options=$(scanimage --device "$device" -A 2>/dev/null)
+    options=$(scanimage --device "$device" -A 2>&1) || true
+    if [ -z "$options" ] || ! echo "$options" | grep -q 'page-loaded'; then
+        echo "Error: scanner not available (busy or disconnected?)" >&2
+        return 1
+    fi
     feeder=$(echo "$options" | grep -oP '(?<=--page-loaded\[=\(yes\|no\)\] \[)\w+')
     front=$(echo "$options" | grep -oP '(?<=--card-loaded\[=\(yes\|no\)\] \[)\w+')
 
@@ -50,6 +68,16 @@ resolve_source() {
     else
         return 2
     fi
+}
+
+# Detect which input holds a document and capture one batch into "<prefix>-NNNN.tiff"
+# files. Holds the scan lock for the whole SANE session.
+scan_pages() {
+    local device=$1 prefix=$2
+    local source
+    source=$(resolve_source "$device") || return $?
+    echo "Scanning (duplex, color, A4) from $source..."
+    scan_batch "$device" "$source" "$prefix"
 }
 
 # Echo which Paperless delivery mode the environment selects.

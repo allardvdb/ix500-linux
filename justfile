@@ -377,6 +377,13 @@ reload:
     chmod +x "$BIN/scan" "$BIN/scan-button-poll" "$BIN/scan-doc" "$BIN/scan-gui"
     echo "Scripts updated in $BIN"
 
+    if [ -f "$SCRIPT_DIR/scan-button.service" ]; then
+        mkdir -p "$HOME/.config/systemd/user"
+        cp "$SCRIPT_DIR/scan-button.service" "$HOME/.config/systemd/user/"
+        systemctl --user daemon-reload
+        echo "systemd service updated"
+    fi
+
     systemctl --user restart scan-button.service 2>/dev/null && \
         echo "scan-button.service restarted" || \
         echo "scan-button.service not running (connect scanner to activate)"

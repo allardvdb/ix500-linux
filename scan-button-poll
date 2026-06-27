@@ -9,6 +9,7 @@ DEBOUNCE=3
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCAN_SCRIPT="$SCRIPT_DIR/scan"
 SCAN_GUI="$SCRIPT_DIR/scan-gui"
+source "$SCRIPT_DIR/scan-lib.sh"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -25,9 +26,26 @@ gui_running() {
             --method org.freedesktop.DBus.NameHasOwner \
             com.github.ix500linux.ScanGui 2>/dev/null)
         [ "$owned" = "(true,)" ] && return 0
-        [ "$owned" = "(false,)" ] && return 1
     fi
-    pgrep -f 'scan-gui' >/dev/null 2>&1
+    pgrep -f '[s]can-gui' >/dev/null 2>&1
+}
+
+# Ask the running GUI to scan. SIGUSR1 is the primary path (reliable from
+# systemd); D-Bus action and a second --scan instance are fallbacks.
+forward_to_gui() {
+    local pid
+    pid=$(pgrep -f '[s]can-gui' | head -1)
+    if [ -n "$pid" ]; then
+        kill -USR1 "$pid" 2>/dev/null && return 0
+    fi
+    if command -v gdbus >/dev/null 2>&1; then
+        gdbus call --session \
+            --dest com.github.ix500linux.ScanGui \
+            --object-path /com/github/ix500linux/ScanGui \
+            --method org.gtk.Actions.Activate \
+            scan '[]' '{}' >/dev/null 2>&1 && return 0
+    fi
+    "$SCAN_GUI" --scan >/dev/null 2>&1 &
 }
 
 # Headless one-button scan (single page + Paperless) with desktop notifications.
@@ -77,8 +95,17 @@ detect_device() {
 }
 
 get_button_state() {
-    # Read scanner options, extract scan button state
-    scanimage --device "$DEVICE" -A 2>/dev/null | grep -oP '(?<=--scan\[=\(yes\|no\)\] \[)\w+' || echo "error"
+    local output state
+    output=$(SCAN_LOCK_TIMEOUT=1 with_scan_lock scanimage --device "$DEVICE" -A 2>/dev/null) || {
+        echo "busy"
+        return
+    }
+    state=$(echo "$output" | grep -oP '(?<=--scan\[=\(yes\|no\)\] \[)\w+' || true)
+    if [ -z "$state" ]; then
+        echo "error"
+    else
+        echo "$state"
+    fi
 }
 
 # Scanner device — from env or auto-detect
@@ -99,12 +126,15 @@ sleep 2
 
 # Main polling loop
 while true; do
+    poll_interval=$POLL_INTERVAL
+    gui_running && poll_interval=0.5
+
     button_state=$(get_button_state)
 
     if [ "$button_state" = "yes" ]; then
         if gui_running; then
             log "Button pressed! Forwarding to GUI..."
-            "$SCAN_GUI" --scan >/dev/null 2>&1 &
+            forward_to_gui
         else
             log "Button pressed! Starting headless scan..."
             run_headless_scan
@@ -118,6 +148,7 @@ while true; do
         log "Scanner not responding, waiting..."
         sleep 5
     fi
+    # "busy" = GUI or another scan holds the lock; retry on the next tick.
 
-    sleep "$POLL_INTERVAL"
+    sleep "$poll_interval"
 done

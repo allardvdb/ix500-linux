@@ -21,6 +21,7 @@ window, the two choices, and the flow between scan pages.
 
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -157,12 +158,14 @@ class ScanWindow(Gtk.ApplicationWindow):
 
     def trigger_scan(self):
         """Act on a scan request from the on-screen or hardware button."""
+        if self.state == STATE_BUSY:
+            self.status.set_text("Still scanning, please wait...")
+            return
         if self.state == STATE_IDLE:
             self.doc = ScanDoc()
             self._capture()
         elif self.state == STATE_AWAITING_NEXT:
             self._capture()
-        # STATE_BUSY: a scan is already running, ignore.
 
     def _capture(self):
         self._set_busy("Scanning...")
@@ -174,7 +177,7 @@ class ScanWindow(Gtk.ApplicationWindow):
             return
 
         if not result.ok:
-            self.status.set_text("Nothing added this time.")
+            self.status.set_text("Nothing added — load a page and try again.")
 
         if self.page_multi.get_active():
             self._await_next()
@@ -187,6 +190,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         self.scan_button.set_sensitive(True)
         self.finish_button.set_visible(True)
         self.finish_button.set_sensitive(True)
+        self._send_frame.set_sensitive(True)
         self.status.set_text(
             f"Scanned {self.doc.pages} page(s). Load the next page, then Scan."
         )
@@ -230,7 +234,8 @@ class ScanWindow(Gtk.ApplicationWindow):
         self._set_idle()
         dialog = Gtk.AlertDialog()
         dialog.set_message(summary)
-        dialog.set_detail(_last_line(detail) or detail)
+        detail_text = _last_line(detail) or detail.strip() or "Unknown error"
+        dialog.set_detail(detail_text)
         dialog.show(self)
 
 
@@ -250,12 +255,34 @@ class ScanApp(Gtk.Application):
             "Trigger a scan in the running window", None,
         )
 
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+
+        scan_action = Gio.SimpleAction.new("scan", None)
+        scan_action.connect("activate", self._on_scan_action)
+        self.add_action(scan_action)
+
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self._on_scan_signal)
+
+    def _on_scan_signal(self):
+        GLib.idle_add(self._trigger_scan)
+        return True
+
+    def _on_scan_action(self, _action, _param):
+        GLib.idle_add(self._trigger_scan)
+
+    def _trigger_scan(self):
+        window = self.props.active_window or ScanWindow(self)
+        window.present()
+        window.trigger_scan()
+        return False
+
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
         window = self.props.active_window or ScanWindow(self)
         window.present()
         if options.contains("scan"):
-            window.trigger_scan()
+            GLib.idle_add(self._trigger_scan)
         return 0
 
 
