@@ -188,12 +188,14 @@ class ScanWindow(Gtk.ApplicationWindow):
         run_async(lambda: self.doc.capture(color_mode), self.on_capture_done)
 
     def on_capture_done(self, result):
-        if not result.ok and self.doc.pages == 0:
-            self._fail("Scan failed", result.output)
-            return
-
         if not result.ok:
-            self.status.set_text("Nothing added — load a page and try again.")
+            summary = _capture_error_summary(result.output)
+            if self.doc.pages == 0:
+                self._fail(summary, result.output)
+                return
+            self._await_next()
+            self._show_alert(summary, result.output)
+            return
 
         if self.page_multi.get_active():
             self._await_next()
@@ -251,16 +253,27 @@ class ScanWindow(Gtk.ApplicationWindow):
             self.doc = None
         self.status.set_text(summary)
         self._set_idle()
+        self._show_alert(summary, detail)
+
+    def _show_alert(self, summary, detail=""):
         dialog = Gtk.AlertDialog()
         dialog.set_message(summary)
-        detail_text = _last_line(detail) or detail.strip() or "Unknown error"
-        dialog.set_detail(detail_text)
+        detail_text = _last_line(detail) or detail.strip()
+        if detail_text:
+            dialog.set_detail(detail_text)
         dialog.show(self)
 
 
 def _last_line(text):
     lines = [line for line in (text or "").splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+def _capture_error_summary(output):
+    text = (output or "").lower()
+    if "no pages scanned" in text or "feeder empty" in text:
+        return "No document loaded"
+    return "Scan failed"
 
 
 class ScanApp(Gtk.Application):

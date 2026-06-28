@@ -218,7 +218,9 @@ install:
     # Desktop launcher for the GUI (Exec points at the installed script)
     mkdir -p "$HOME/.local/share/applications"
     sed "s|^Exec=scan-gui|Exec=$HOME/.local/bin/scan-gui|" \
-        "$SCRIPT_DIR/scan-gui.desktop" > "$HOME/.local/share/applications/scan-gui.desktop"
+        "$SCRIPT_DIR/com.github.scansnaplinux.ScanGui.desktop" \
+        > "$HOME/.local/share/applications/com.github.scansnaplinux.ScanGui.desktop"
+    rm -f "$HOME/.local/share/applications/scan-gui.desktop"
     ok "GUI desktop launcher installed"
 
     mkdir -p "$HOME/.config/systemd/user"
@@ -380,6 +382,7 @@ uninstall:
     ok "Scripts removed from ~/.local/bin/"
 
     # Remove GUI desktop launcher
+    rm -f "$HOME/.local/share/applications/com.github.scansnaplinux.ScanGui.desktop"
     rm -f "$HOME/.local/share/applications/scan-gui.desktop"
     ok "GUI desktop launcher removed"
 
