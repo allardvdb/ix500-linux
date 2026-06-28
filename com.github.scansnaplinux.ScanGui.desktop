@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ScanSnap
+Comment=Scan to Paperless, a folder, or NAPS2 with a Fujitsu ScanSnap
+Exec=scan-gui
+Icon=scanner
+StartupWMClass=com.github.scansnaplinux.ScanGui
+Terminal=false
+Categories=Utility;Scanning;
