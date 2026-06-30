@@ -15,7 +15,7 @@ The system has two entry points — the hardware button and a desktop GUI — bu
 3. **`scan-button-poll`** — Bash script polling the scanner button every 0.1s via `scanimage -A`; on press it forwards to the GUI when one is running (SIGUSR1, with D-Bus / `scan-gui --scan` fallbacks) and otherwise runs `scan` headlessly; 3s debounce; sends clickable desktop notifications for headless scans
 4. **`scan-lib.sh`** — Sourced bash library holding all reusable routines: `with_scan_lock`, `resolve_device`, `resolve_source`, `scan_pages`, `scan_batch`, `delivery_mode`, `apply_color_mode`, `enhance_pages`, `build_pdf`, `deliver_document`, `deliver_naps2`. Contains no top-level logic — callers wire the functions together.
 5. **`scan`** — Thin one-button entry point. Sources `scan-lib.sh`, captures one duplex batch, processes pages, delivers via the configured mode. Used by the button poller for headless scans (single page, auto color).
-6. **`scan-doc`** — CLI used by the GUI to build a document across one or more batches. `scan-doc capture <workdir> [--color color|gray|auto]` scans and processes one batch into a working directory (pages named `batch-NN-page-NNNN.tiff` so order is preserved); `scan-doc finalize <workdir> --target paperless|naps2` combines every captured page into one PDF, delivers it, and removes the working directory.
+6. **`scan-doc`** — CLI used by the GUI to build a document across one or more batches. `scan-doc capture <workdir> [--color color|gray|auto] [--raw]` scans and processes one batch into a working directory (pages named `batch-NN-page-NNNN.tiff` so order is preserved); `scan-doc finalize <workdir> --target paperless|naps2|raw-tiff` combines every captured page into one PDF, delivers it, and removes the working directory. `--raw` capture leaves pages exactly as the scanner produced them (no color detection, crop, deskew, or rotate); the `raw-tiff` target copies those TIFFs out unchanged for the tuning corpus.
 7. **`scan-gui`** — PyGObject/GTK4 desktop app, registered as a single instance (`com.github.scansnaplinux.ScanGui`). Three radio sections (Pages: single/multi; Color: color/grayscale/auto; Send to: Paperless/NAPS2) plus a Scan button. It only drives the flow: it calls `scan-doc capture`, shows in-window next-page controls between pages in multi-page mode, then calls `scan-doc finalize`. A scan is triggered by the on-screen button or by SIGUSR1 / the `scan` D-Bus action / `scan-gui --scan` (how the hardware button reaches a running window), routed through an idle/busy/awaiting-next state so either button starts a scan or adds the next page. Scanning runs on a worker thread to keep the UI responsive.
 
 ### Scanner access locking
@@ -41,6 +41,10 @@ The GUI's Color section sets this per capture via `scan-doc capture --color`; th
 - **Multi page**: `capture`, then in-window next-page controls (the Scan button becomes "Scan next page" and a "Finish" button appears) appending pages into the same working directory, then a single `finalize` combining them into one PDF. Because the controls live in the window (not a modal dialog), a hardware button press forwarded as SIGUSR1 adds the next page just like clicking "Scan next page". Color and Send-to can be changed between pages; Pages cannot.
 - **Send to Paperless**: `finalize --target paperless`, which reuses the same configured delivery (API or folder) as the hardware button.
 - **Send to NAPS2**: `finalize --target naps2`, which builds the PDF into `~/Documents/scanner-inbox/` and opens it in the NAPS2 desktop app (`naps2 <pdf>`).
+
+### Developer mode (`--dev`)
+
+Launching the GUI with `scan-gui --dev` (or `just gui --dev`) reveals an extra "Raw Tiff" option in the Send-to section. Selecting it captures with `--raw` and finalizes with `--target raw-tiff`, saving the untouched scanner TIFFs to `RAW_TIFF_DIR` (default `~/Documents/scanner-raw/<name>/page-NNNN.tiff`). This is the input side of the post-processing tuning loop: drop these files into a corpus case's `raw/` directory and compare candidate output against the Windows ScanSnap reference PDF. The option is hidden in normal use. Dev mode is single-instance-sticky: once a window is launched with `--dev`, hardware-button scans forwarded as `scan-gui --scan` keep the option visible.
 
 ### Two delivery modes
 
@@ -109,6 +113,7 @@ The interactive installer detects the scanner, asks for the delivery mode and it
 
 | Parameter | Value | Location |
 |---|---|---|
+| Raw corpus output dir | `RAW_TIFF_DIR` (default `~/Documents/scanner-raw`) | `scan-lib.sh` (`--dev` only) |
 | Scan resolution | 300 DPI | `scan-lib.sh` |
 | Bleed margin | 10 mm | `scan-lib.sh` |
 | Blank page skip threshold | 20% | `scan-lib.sh` (`--swskip`) |

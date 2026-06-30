@@ -311,6 +311,31 @@ _deliver_folder() {
     echo "Done: $outfile ($pagecount pages, $filesize)"
 }
 
+# Save the captured pages as raw TIFFs (developer-only output).
+#
+# Used by the GUI's hidden "Raw Tiff" mode (`scan-gui --dev`) to build the
+# tuning corpus: pages captured with `--raw` skip color/crop/enhance, so the
+# files written here are straight scanner output. They drop directly into a
+# corpus case's raw/ directory. Destination is RAW_TIFF_DIR (default
+# ~/Documents/scanner-raw), one subfolder per document.
+deliver_raw_tiff() {
+    local name=$1
+    shift
+    local tiffs=("$@")
+    local outdir="${RAW_TIFF_DIR:-$HOME/Documents/scanner-raw}/$name"
+    mkdir -p "$outdir"
+
+    local index=1 tiff
+    for tiff in "${tiffs[@]}"; do
+        cp "$tiff" "$(printf '%s/page-%04d.tiff' "$outdir" "$index")"
+        index=$((index + 1))
+    done
+
+    echo "Saved ${#tiffs[@]} raw page(s) to $outdir"
+    command -v xdg-open >/dev/null 2>&1 && \
+        setsid xdg-open "$outdir" >/dev/null 2>&1 < /dev/null &
+}
+
 # Build a PDF and hand it to the NAPS2 desktop app for review/editing.
 # The PDF is kept in ~/Documents/scanner-inbox/ so NAPS2 has a stable file.
 deliver_naps2() {

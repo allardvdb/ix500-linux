@@ -6,14 +6,17 @@
 # user wants, then finalizes once to deliver a single combined PDF.
 #
 # Usage:
-#   scan-doc capture  <workdir> [--color color|gray|auto]
+#   scan-doc capture  <workdir> [--color color|gray|auto] [--raw]
 #       Scan one duplex batch into <workdir>, cleaning up the new pages.
 #       Prints the number of pages added. Exits non-zero if the feeder
-#       was empty. Color treatment defaults to auto.
+#       was empty. Color treatment defaults to auto. With --raw the pages
+#       are left exactly as the scanner produced them (no color detection,
+#       crop, deskew, or rotate) so they can seed the tuning corpus.
 #
-#   scan-doc finalize <workdir> --target paperless|naps2 [--name NAME]
+#   scan-doc finalize <workdir> --target paperless|naps2|raw-tiff [--name NAME]
 #       Combine every captured page into one PDF, deliver it, and remove
-#       the working directory.
+#       the working directory. The raw-tiff target instead copies the
+#       captured TIFFs out unchanged (developer corpus output).
 
 set -e
 
@@ -36,10 +39,11 @@ capture() {
     shift
     [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
 
-    local color="auto"
+    local color="auto" raw=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --color) color=$2; shift 2 ;;
+            --raw)   raw=1; shift ;;
             *) echo "Unknown capture option: $1" >&2; exit 1 ;;
         esac
     done
@@ -61,6 +65,11 @@ capture() {
         exit 1
     fi
     echo "Scanned ${#new_pages[@]} page(s)"
+
+    if [ "$raw" -eq 1 ]; then
+        echo "Raw mode: skipping color detection and enhancement."
+        return
+    fi
 
     apply_color_mode "${new_pages[@]}"
     enhance_pages "${new_pages[@]}"
@@ -94,7 +103,8 @@ finalize() {
     case "$target" in
         paperless) deliver_document "$name" "${pages[@]}" ;;
         naps2)     deliver_naps2 "$name" "${pages[@]}" ;;
-        *) echo "Unknown or missing --target (expected paperless|naps2)" >&2; exit 1 ;;
+        raw-tiff)  deliver_raw_tiff "$name" "${pages[@]}" ;;
+        *) echo "Unknown or missing --target (expected paperless|naps2|raw-tiff)" >&2; exit 1 ;;
     esac
 
     rm -rf "$workdir"
@@ -105,7 +115,7 @@ case "$COMMAND" in
     capture)  shift; capture "$@" ;;
     finalize) shift; finalize "$@" ;;
     *)
-        echo "Usage: scan-doc {capture <workdir> [--color color|gray|auto] | finalize <workdir> --target paperless|naps2 [--name NAME]}" >&2
+        echo "Usage: scan-doc {capture <workdir> [--color color|gray|auto] [--raw] | finalize <workdir> --target paperless|naps2|raw-tiff [--name NAME]}" >&2
         exit 1
         ;;
 esac

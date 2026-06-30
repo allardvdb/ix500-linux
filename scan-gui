@@ -12,6 +12,8 @@ Three choices, then scan:
 
   Send to  Paperless   - deliver through the configured Paperless/folder pipeline.
            NAPS2       - open the finished PDF in the NAPS2 desktop app.
+           Raw Tiff    - developer-only (shown with `--dev`); save the pages as
+                         untouched scanner TIFFs for the tuning corpus.
 
 A scan is triggered either by the on-screen button or by the hardware scanner
 button. The scanner button reaches the running window through a second
@@ -51,8 +53,11 @@ class ScanDoc:
         self.workdir = tempfile.mkdtemp(prefix="scan-gui-")
         self.pages = 0
 
-    def capture(self, color_mode):
-        result = _run([SCAN_DOC, "capture", self.workdir, "--color", color_mode])
+    def capture(self, color_mode, raw=False):
+        argv = [SCAN_DOC, "capture", self.workdir, "--color", color_mode]
+        if raw:
+            argv.append("--raw")
+        result = _run(argv)
         if result.ok:
             self.pages += 1
         return result
@@ -90,7 +95,9 @@ def run_async(argv_or_callable, on_done):
 
 class ScanWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="ScanSnap")
+        self.dev_mode = getattr(app, "dev_mode", False)
+        title = "ScanSnap (dev)" if self.dev_mode else "ScanSnap"
+        super().__init__(application=app, title=title)
         self.set_default_size(360, -1)
         self.doc = None
         self.state = STATE_IDLE
@@ -105,10 +112,12 @@ class ScanWindow(Gtk.ApplicationWindow):
                 [("Color", False), ("Grayscale", False), ("Auto", True)],
             )
         )
-        self._send_frame, (self.send_paperless, self.send_naps2) = self._build_choice_section(
-            "Send to",
-            [("Send to Paperless", True), ("Send to NAPS2", False)],
-        )
+        send_options = [("Send to Paperless", True), ("Send to NAPS2", False)]
+        if self.dev_mode:
+            send_options.append(("Raw Tiff", False))
+        self._send_frame, send_buttons = self._build_choice_section("Send to", send_options)
+        self.send_paperless, self.send_naps2 = send_buttons[0], send_buttons[1]
+        self.send_raw = send_buttons[2] if self.dev_mode else None
 
         self.scan_button = Gtk.Button(label="Scan")
         self.scan_button.add_css_class("suggested-action")
@@ -182,10 +191,18 @@ class ScanWindow(Gtk.ApplicationWindow):
             return "gray"
         return "auto"
 
+    def _send_target(self):
+        if self.send_raw is not None and self.send_raw.get_active():
+            return "raw-tiff"
+        if self.send_naps2.get_active():
+            return "naps2"
+        return "paperless"
+
     def _capture(self):
         self._set_busy("Scanning...")
         color_mode = self._color_mode()
-        run_async(lambda: self.doc.capture(color_mode), self.on_capture_done)
+        raw = self._send_target() == "raw-tiff"
+        run_async(lambda: self.doc.capture(color_mode, raw), self.on_capture_done)
 
     def on_capture_done(self, result):
         if not result.ok:
@@ -215,7 +232,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         )
 
     def _finalize(self):
-        target = "naps2" if self.send_naps2.get_active() else "paperless"
+        target = self._send_target()
         self._set_busy("Finishing...")
         run_async(lambda: self.doc.finalize(target), self.on_finalize_done)
 
@@ -282,9 +299,14 @@ class ScanApp(Gtk.Application):
             application_id="com.github.scansnaplinux.ScanGui",
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
+        self.dev_mode = False
         self.add_main_option(
             "scan", ord("s"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Trigger a scan in the running window", None,
+        )
+        self.add_main_option(
+            "dev", ord("d"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Show developer options (Raw Tiff output)", None,
         )
 
     def do_startup(self):
@@ -311,6 +333,8 @@ class ScanApp(Gtk.Application):
 
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
+        if options.contains("dev"):
+            self.dev_mode = True
         window = self.props.active_window or ScanWindow(self)
         window.present()
         if options.contains("scan"):

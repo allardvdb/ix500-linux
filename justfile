@@ -343,9 +343,9 @@ reload:
         echo "scan-button.service restarted" || \
         echo "scan-button.service not running (connect scanner to activate)"
 
-# Launch the scan GUI
-gui:
-    ./scan-gui
+# Launch the scan GUI (pass --dev to reveal the Raw Tiff corpus output)
+gui *args:
+    ./scan-gui {{args}}
 
 # Show service status
 status:
