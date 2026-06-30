@@ -9,7 +9,7 @@
 #   scan-doc capture  <workdir> [--color color|gray|auto] [--raw]
 #       Scan one duplex batch into <workdir>, cleaning up the new pages.
 #       Prints the number of pages added. Exits non-zero if the feeder
-#       was empty. Color treatment defaults to auto. With --raw the pages
+#       was empty. Color treatment defaults to color. With --raw the pages
 #       are left exactly as the scanner produced them (no color detection,
 #       crop, deskew, or rotate) so they can seed the tuning corpus.
 #
@@ -39,7 +39,7 @@ capture() {
     shift
     [ -d "$workdir" ] || { echo "Working directory not found: $workdir" >&2; exit 1; }
 
-    local color="auto" raw=0
+    local color="color" raw=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --color) color=$2; shift 2 ;;
@@ -72,6 +72,7 @@ capture() {
 
     apply_color_mode "${new_pages[@]}"
     enhance_pages "${new_pages[@]}"
+    tone_pages "${new_pages[@]}"
 }
 
 finalize() {

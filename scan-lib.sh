@@ -54,6 +54,10 @@ refresh_device() {
 # Last scanimage error line, set by scan_batch for callers to surface in the UI.
 SCAN_LAST_ERROR=""
 
+# Printed by enhance_pages when no page orientation could be determined, so the
+# GUI can offer a NAPS2 fallback. Kept as a stable, greppable sentinel line.
+ORIENTATION_UNDETERMINED_MARKER="[scan] orientation-undetermined"
+
 # Map capture failure codes to stderr messages for the GUI/CLI.
 # resolve_source already prints specific errors for codes 4 and 5.
 report_capture_failure() {
@@ -174,6 +178,18 @@ scan_batch() {
         | grep -iE 'scanimage:.*(error|cannot|failed)' \
         | tail -1 \
         | sed 's/^scanimage:[[:space:]]*//')
+    # Fujitsu batch mode scans until the feeder is empty; the final sane_start
+    # after the last page often reports "out of documents" even though the batch
+    # succeeded. Treat that as success when output files were written.
+    if [ "$rc" -ne 0 ]; then
+        shopt -s nullglob
+        local pages=("${prefix}"-*.tiff)
+        if [ ${#pages[@]} -gt 0 ] \
+                && printf '%s\n' "$output" | grep -qiE 'out of documents|no documents'; then
+            rc=0
+            SCAN_LAST_ERROR=""
+        fi
+    fi
     if [ -n "$output" ]; then
         printf '%s\n' "$output" | grep -v "^$" || true
     fi
@@ -183,10 +199,10 @@ scan_batch() {
 # Apply the chosen color treatment to the pages. COLOR_MODE selects:
 #   color - keep every page in color (no conversion)
 #   gray  - force every page to grayscale
-#   auto  - convert near-monochrome pages to grayscale per page (default)
+#   auto  - convert near-monochrome pages to grayscale per page
 apply_color_mode() {
     local tiffs=("$@")
-    local mode="${COLOR_MODE:-auto}"
+    local mode="${COLOR_MODE:-color}"
 
     case "$mode" in
         color)
@@ -231,16 +247,57 @@ _detect_color_per_page() {
 }
 
 # Detect the upright orientation of a page via tesseract (0/90/180/270).
-# Used for every delivery mode, not just Paperless or folder.
-_page_rotation() {
+# Only trust the result when tesseract's orientation confidence clears
+# ROTATE_MIN_CONFIDENCE. On sparse pages (logos, decorative cards, calligraphy)
+# OSD guesses with near-zero confidence and would otherwise flip the page the
+# wrong way — that is what turned the "Thank You" tag upside down in testing.
+# Empty output means "no trustworthy reading" so the document-level planner can
+# borrow orientation from a sibling page instead.
+_gated_page_rotation() {
     command -v tesseract >/dev/null 2>&1 || return 0
-    tesseract "$1" stdout --psm 0 2>/dev/null \
-        | grep -i 'Rotate:' \
-        | grep -oE '[0-9]+' \
-        | head -1
+    local osd rotate confidence min="${ROTATE_MIN_CONFIDENCE:-2.0}"
+    osd=$(tesseract "$1" stdout --psm 0 2>/dev/null) || return 0
+    rotate=$(echo "$osd" | grep -i 'Rotate:' | grep -oE '[0-9]+' | head -1)
+    confidence=$(echo "$osd" | grep -i 'Orientation confidence:' | grep -oE '[0-9.]+' | head -1)
+    [ -n "$rotate" ] && [ -n "$confidence" ] || return 0
+    if (( $(echo "$confidence < $min" | bc -l) )); then
+        return 0
+    fi
+    echo "$rotate"
 }
 
-# Pixels to shave off scanner-bed grey before white-border trimming.
+# Decide a rotation for every page and echo one value per line (blank = leave
+# the page as-is). Pages tesseract can read keep their own orientation. Pages it
+# cannot read borrow orientation from a confident page elsewhere in the same
+# document. ScanSnap duplex captures alternate by 180 degrees per sheet side, so
+# the borrowed value is offset by the page's parity (verified across the corpus:
+# a card's blank logo side and its text side need opposite rotations). When no
+# page in the document is readable, none are rotated.
+_resolve_rotation_plan() {
+    local tiffs=("$@")
+    local -a own=()
+    local i rot base=""
+
+    for ((i = 0; i < ${#tiffs[@]}; i++)); do
+        rot=$(_gated_page_rotation "${tiffs[$i]}")
+        own+=("$rot")
+        if [ -z "$base" ] && [ -n "$rot" ]; then
+            base=$(( (rot + 180 * (i % 2)) % 360 ))
+        fi
+    done
+
+    for ((i = 0; i < ${#tiffs[@]}; i++)); do
+        if [ -n "${own[$i]}" ]; then
+            echo "${own[$i]}"
+        elif [ -n "$base" ]; then
+            echo $(( (base + 180 * (i % 2)) % 360 ))
+        else
+            echo ""
+        fi
+    done
+}
+
+# Pixels to shave off scanner-bed grey before optional fringe removal.
 _crop_shave_pixels() {
     if [ -n "${AUTO_CROP_SHAVE_PX:-}" ]; then
         echo "$AUTO_CROP_SHAVE_PX"
@@ -250,40 +307,154 @@ _crop_shave_pixels() {
     echo "scale=0; $RESOLUTION * $shave_mm / 25.4 + 0.5" | bc
 }
 
-# Auto-rotate, deskew, and crop a single page in place.
-_enhance_page() {
+# Trim uniform border down to the sheet edge, but never remove more than
+# CROP_MAX_PCT per side. The driver (--swcrop) has usually already cropped to
+# the paper, so this mainly cleans up the white that deskew adds at the corners;
+# the per-side cap stops it from eating into a page that legitimately has wide
+# uniform margins (a centered logo, a calligraphy sheet) down to the ink.
+#
+# NOTE: a tighter, artifact-free crop (e.g. removing the diagonal bed wedge seen
+# on small angled cards) needs --swcrop disabled at capture so we can detect the
+# sheet ourselves. That is a capture-level change, tracked as a future step.
+_edge_crop() {
+    local tiff=$1
+    local fuzz="${AUTO_CROP_FUZZ:-15%}"
+    local max_pct="${CROP_MAX_PCT:-6}"
+    local W H box bw bh bx by
+
+    W=$(magick "$tiff" -format '%w' info:)
+    H=$(magick "$tiff" -format '%h' info:)
+    box=$(magick "$tiff" -fuzz "$fuzz" -format "%@" info:) || return 0
+    bw=${box%%x*}; box=${box#*x}
+    bh=${box%%+*}; box=${box#*+}
+    bx=${box%%+*}; by=${box#*+}
+    [ -n "$bw" ] && [ -n "$bh" ] && [ -n "$bx" ] && [ -n "$by" ] || return 0
+
+    local cap_w=$(( W * max_pct / 100 )) cap_h=$(( H * max_pct / 100 ))
+    local left=$bx top=$by right=$(( W - bx - bw )) bottom=$(( H - by - bh ))
+    if (( left > cap_w )); then left=$cap_w; fi
+    if (( right > cap_w )); then right=$cap_w; fi
+    if (( top > cap_h )); then top=$cap_h; fi
+    if (( bottom > cap_h )); then bottom=$cap_h; fi
+
+    local cw=$(( W - left - right )) ch=$(( H - top - bottom ))
+    if (( cw <= 0 || ch <= 0 )); then return 0; fi
+    if (( left == 0 && top == 0 && right == 0 && bottom == 0 )); then return 0; fi
+    magick "$tiff" -crop "${cw}x${ch}+${left}+${top}" +repage "$tiff"
+}
+
+# Crop a page in place according to AUTO_CROP_MODE:
+#   edge  - bounded trim to the sheet edge (default, card-safe)
+#   shave - remove a fixed fringe only
+#   trim  - unbounded content trim (legacy; over-crops low-contrast pages)
+#   none  - trust the driver crop, do nothing
+_apply_page_crop() {
     local tiff=$1
     local tmp="${tiff}.enhancing"
-    local fuzz="${AUTO_CROP_FUZZ:-10%}"
-    local shave_px
-    shave_px=$(_crop_shave_pixels)
+    local mode="${AUTO_CROP_MODE:-edge}"
+    local shave_px fuzz
+
+    [ "${AUTO_CROP:-true}" = "true" ] || return 0
+
+    case "$mode" in
+        none) return 0 ;;
+        edge) _edge_crop "$tiff" ;;
+        shave)
+            shave_px=$(_crop_shave_pixels)
+            magick "$tiff" -shave "${shave_px}x${shave_px}" +repage "$tmp"
+            mv "$tmp" "$tiff"
+            ;;
+        trim)
+            shave_px=$(_crop_shave_pixels)
+            fuzz="${AUTO_CROP_FUZZ:-12%}"
+            magick "$tiff" \
+                -shave "${shave_px}x${shave_px}" \
+                -bordercolor white -border 1 \
+                -fuzz "$fuzz" -trim +repage -shave 1x1 \
+                "$tmp"
+            mv "$tmp" "$tiff"
+            ;;
+        *)
+            echo "Unknown AUTO_CROP_MODE: $mode (expected none|edge|shave|trim)" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Straighten small scan skew, but only when the text skew agrees with the
+# paper-edge skew. ImageMagick's -deskew reads the angle from dark marks on a
+# light page, so artistic or sparse content (e.g. calligraphy written at a
+# slight slant on a perfectly straight card) fools it into rotating a straight
+# sheet — that was the doc-6 skew. We measure the angle two ways: from the
+# content (-deskew) and from a thresholded paper-edge mask. When they disagree,
+# the content is slanted relative to the sheet, so we trust the sheet and skip.
+_maybe_deskew() {
+    local tiff=$1
+    [ "${AUTO_DESKEW:-true}" = "true" ] || return 0
+    local tmp="${tiff}.deskew" text sheet
+    text=$(magick "$tiff" -deskew 40% -format "%[deskew:angle]" info: 2>/dev/null)
+    [ -n "$text" ] || return 0
+    sheet=$(magick "$tiff" -colorspace Gray -threshold "${DESKEW_THRESHOLD:-82%}" \
+        -negate -deskew 40% -format "%[deskew:angle]" info: 2>/dev/null)
+    if [ -n "$sheet" ] && ! awk -v t="$text" -v s="$sheet" -v m="${DESKEW_AGREE_DEG:-0.8}" \
+            'BEGIN { d = t - s; if (d < 0) d = -d; exit !(d <= m) }'; then
+        return 0
+    fi
+    magick "$tiff" -deskew 40% -background white +repage "$tmp"
+    mv "$tmp" "$tiff"
+}
+
+# Rotate (to the planner's value), deskew, and crop a single page in place.
+# The rotation is decided per document by _resolve_rotation_plan and passed in;
+# an empty value means leave the page's orientation untouched.
+_enhance_page() {
+    local tiff=$1
+    local rotate=${2:-}
+    local tmp="${tiff}.enhancing"
 
     if [ "${AUTO_ROTATE:-true}" = "true" ]; then
-        local rotate
-        local -a rotate_args=()
-        rotate=$(_page_rotation "$tiff")
         case "$rotate" in
-            90|180|270) rotate_args+=(-rotate "$rotate") ;;
+            90|180|270)
+                magick "$tiff" -background white -rotate "$rotate" +repage "$tmp"
+                mv "$tmp" "$tiff"
+                ;;
         esac
-        rotate_args+=(-deskew 40% -background white)
-        magick "$tiff" "${rotate_args[@]}" "$tmp"
-        mv "$tmp" "$tiff"
-    elif [ "${AUTO_DESKEW:-true}" = "true" ]; then
-        magick "$tiff" -deskew 40% -background white "$tmp"
-        mv "$tmp" "$tiff"
     fi
 
-    if [ "${AUTO_CROP:-true}" = "true" ]; then
-        magick "$tiff" \
-            -shave "${shave_px}x${shave_px}" \
-            -bordercolor white -border 1 \
-            -fuzz "$fuzz" -trim +repage -shave 1x1 \
-            "$tmp"
-        mv "$tmp" "$tiff"
-    fi
+    _maybe_deskew "$tiff"
+    _apply_page_crop "$tiff"
+}
+
+# Pull the paper toward white and deepen the ink (levels + gamma). This is the
+# 291f61a tone: a plain per-channel level stretch plus midtone gamma. An earlier
+# saturation pull-back (-modulate) was tried to tame colored paper but it left
+# the photo-heavy recipe cards looking washed out, so it was removed.
+_tone_page() {
+    local tiff=$1
+    [ "${TONE:-true}" = true ] || return 0
+    local black_pct="${TONE_BLACK_PCT:-6}"
+    local white_pct="${TONE_WHITE_PCT:-90}"
+    local gamma="${TONE_GAMMA:-1.2}"
+    magick "$tiff" \
+        -channel RGB -level "${black_pct}%,${white_pct}%" +channel \
+        -gamma "$gamma" \
+        "$tiff"
+}
+
+# Brightness / white-balance pass tuned against the Windows ScanSnap corpus.
+tone_pages() {
+    local tiffs=("$@")
+    [ "${TONE:-true}" = true ] || return 0
+    echo "Toning pages..."
+    local tiff
+    for tiff in "${tiffs[@]}"; do
+        _tone_page "$tiff"
+    done
 }
 
 # Enhance a list of pages, unless rotate, deskew, and crop are all disabled.
+# Rotation is decided once for the whole document so unreadable pages can borrow
+# orientation from readable siblings (see _resolve_rotation_plan).
 enhance_pages() {
     local tiffs=("$@")
     if [ "${AUTO_CROP:-true}" != "true" ] \
@@ -292,17 +463,39 @@ enhance_pages() {
         return
     fi
     echo "Enhancing pages..."
-    local tiff
-    for tiff in "${tiffs[@]}"; do
-        _enhance_page "$tiff"
+
+    local -a rotations=()
+    if [ "${AUTO_ROTATE:-true}" = "true" ]; then
+        mapfile -t rotations < <(_resolve_rotation_plan "${tiffs[@]}")
+    fi
+
+    # Tell callers (the GUI) when no page could be oriented, so they can offer
+    # to route the document to NAPS2 for a manual look instead.
+    local determined=0 r
+    for r in "${rotations[@]}"; do
+        [ -n "$r" ] && { determined=1; break; }
+    done
+    if [ "${AUTO_ROTATE:-true}" = "true" ] && [ "$determined" -eq 0 ]; then
+        echo "$ORIENTATION_UNDETERMINED_MARKER"
+    fi
+
+    local i
+    for ((i = 0; i < ${#tiffs[@]}; i++)); do
+        _enhance_page "${tiffs[$i]}" "${rotations[$i]:-}"
     done
 }
 
-# Combine TIFF pages into a single PDF.
+# Combine TIFF pages into a single PDF with tuned JPEG compression.
 build_pdf() {
     local outpdf=$1
     shift
-    magick "$@" "$outpdf"
+    local quality="${JPEG_QUALITY:-75}"
+    local sampling="${JPEG_SAMPLING:-4:2:0}"
+    local density="${PDF_DENSITY:-300}"
+    magick "$@" \
+        -units PixelsPerInch -density "$density" \
+        -compress JPEG -quality "$quality" -sampling-factor "$sampling" \
+        "$outpdf"
 }
 
 # Deliver processed pages via the configured mode: upload to Paperless-ngx

@@ -5,7 +5,8 @@
 # Delivery mode is chosen automatically from the environment:
 #   PAPERLESS_URL + PAPERLESS_TOKEN → upload via the Paperless-ngx API
 #   FOLDER_DIR                      → write the PDF to that folder
-# Color treatment defaults to auto (per-page color/grayscale detection).
+# Color treatment defaults to color (per-page grayscale detection is still
+# available via COLOR_MODE=auto).
 #
 # For the GUI workflow (single/multi page, color choice, NAPS2 target) see
 # `scan-doc`.
@@ -36,4 +37,5 @@ echo "Scanned ${#pages[@]} page(s)"
 
 apply_color_mode "${pages[@]}"
 enhance_pages "${pages[@]}"
+tone_pages "${pages[@]}"
 deliver_document "$FILENAME" "${pages[@]}"

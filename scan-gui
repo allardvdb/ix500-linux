@@ -41,6 +41,11 @@ from gi.repository import Gio, GLib, Gtk
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 SCAN_DOC = os.path.join(SCRIPT_DIR, "scan-doc")
 
+# scan-lib.sh prints this when it could not determine any page's orientation.
+ORIENTATION_UNDETERMINED_MARKER = "orientation-undetermined"
+
+TARGET_LABELS = {"paperless": "Paperless", "naps2": "NAPS2", "raw-tiff": "Raw Tiff"}
+
 # Window states that decide what a scan trigger does.
 STATE_IDLE = "idle"            # ready to start a new document
 STATE_BUSY = "busy"            # scanning or finishing; triggers are ignored
@@ -53,6 +58,9 @@ class ScanDoc:
     def __init__(self):
         self.workdir = tempfile.mkdtemp(prefix="scan-gui-")
         self.pages = 0
+        # True once any batch's orientation was determined; stays False when the
+        # scanner output is too sparse for orientation detection on every page.
+        self.orientation_known = False
 
     def capture(self, color_mode, raw=False):
         argv = [SCAN_DOC, "capture", self.workdir, "--color", color_mode]
@@ -61,6 +69,8 @@ class ScanDoc:
         result = _run(argv)
         if result.ok:
             self.pages += 1
+            if ORIENTATION_UNDETERMINED_MARKER not in result.output:
+                self.orientation_known = True
         return result
 
     def finalize(self, target):
@@ -110,7 +120,7 @@ class ScanWindow(Gtk.ApplicationWindow):
         self._color_frame, (self.color_color, self.color_gray, self.color_auto) = (
             self._build_choice_section(
                 "Color",
-                [("Color", False), ("Grayscale", False), ("Auto", True)],
+                [("Color", True), ("Grayscale", False), ("Auto", False)],
             )
         )
         send_options = [("Send to Paperless", True), ("Send to NAPS2", False)]
@@ -235,8 +245,37 @@ class ScanWindow(Gtk.ApplicationWindow):
 
     def _finalize(self):
         target = self._send_target()
+        if self.doc is not None and not self.doc.orientation_known \
+                and target not in ("naps2", "raw-tiff"):
+            self._confirm_naps2_fallback(target)
+            return
+        self._do_finalize(target)
+
+    def _do_finalize(self, target):
         self._set_busy("Finishing...")
         run_async(lambda: self.doc.finalize(target), self.on_finalize_done)
+
+    def _confirm_naps2_fallback(self, target):
+        """Orientation could not be detected — offer NAPS2 for a manual look."""
+        dialog = Gtk.AlertDialog()
+        dialog.set_modal(True)
+        dialog.set_message("Couldn't determine page orientation")
+        dialog.set_detail(
+            "Pages may come out sideways or upside down. Send to NAPS2 to "
+            f"review and rotate them by hand instead of {TARGET_LABELS.get(target, target)}?"
+        )
+        dialog.set_buttons(["Send to NAPS2", f"Keep {TARGET_LABELS.get(target, target)}"])
+        dialog.set_default_button(0)
+        dialog.set_cancel_button(1)
+        dialog.choose(self, None,
+                      lambda d, res: self._on_naps2_choice(d, res, target))
+
+    def _on_naps2_choice(self, dialog, result, target):
+        try:
+            index = dialog.choose_finish(result)
+        except GLib.Error:
+            index = 1
+        self._do_finalize("naps2" if index == 0 else target)
 
     def on_finalize_done(self, result):
         self.doc = None
