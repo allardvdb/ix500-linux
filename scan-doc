@@ -54,14 +54,13 @@ capture() {
     prefix=$(next_batch_prefix "$workdir")
 
     with_scan_lock scan_pages "$device" "$prefix" || {
-        rc=$?
-        [ "$rc" -eq 2 ] && echo "No pages scanned (feeder empty?)" >&2
+        report_capture_failure $?
         exit 1
     }
 
     local new_pages=("$prefix"-*.tiff)
-    if [ ! -e "${new_pages[0]}" ]; then
-        echo "No pages scanned (feeder empty?)" >&2
+    if [ ! -e "${new_pages[0]}" ] || [ ! -s "${new_pages[0]}" ]; then
+        report_capture_failure 3
         exit 1
     fi
     echo "Scanned ${#new_pages[@]} page(s)"

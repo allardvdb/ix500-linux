@@ -31,40 +31,71 @@ with_scan_lock() {
 SCANSNAP_DEVICE_RE="fujitsu:ScanSnap[^']+"
 
 # Echo the SANE device string, or exit 1 if no scanner is found.
+# Uses SCANNER_DEVICE when set (fast path). After a USB reconnect the SANE id
+# suffix changes; refresh_device() re-runs -L only when a probe fails.
 resolve_device() {
-    local device
-    if [ -n "$SCANNER_DEVICE" ]; then
-        device="$SCANNER_DEVICE"
-    else
-        device=$(scanimage -L 2>/dev/null | grep -oP "$SCANSNAP_DEVICE_RE" | head -1)
+    if [ -n "${SCANNER_DEVICE:-}" ]; then
+        echo "$SCANNER_DEVICE"
+        return 0
     fi
-    if [ -z "$device" ]; then
+    refresh_device
+}
+
+refresh_device() {
+    local detected
+    detected=$(scanimage -L 2>/dev/null | grep -oP "$SCANSNAP_DEVICE_RE" | head -1)
+    if [ -z "$detected" ]; then
         echo "Error: no ScanSnap scanner found. Is it connected and powered on?" >&2
         return 1
     fi
-    echo "$device"
+    echo "$detected"
+}
+
+# Last scanimage error line, set by scan_batch for callers to surface in the UI.
+SCAN_LAST_ERROR=""
+
+# Map capture failure codes to stderr messages for the GUI/CLI.
+# resolve_source already prints specific errors for codes 4 and 5.
+report_capture_failure() {
+    local rc=$1
+    case "$rc" in
+        1) echo "Scanner busy — could not acquire the scanner lock" >&2 ;;
+        2) echo "No document detected — feeder and card slot are both empty" >&2 ;;
+        3)
+            if [ -n "$SCAN_LAST_ERROR" ]; then
+                echo "Scanner error: $SCAN_LAST_ERROR" >&2
+            else
+                echo "Scanner error — could not capture pages" >&2
+            fi
+            ;;
+        4|5) ;;
+        *) echo "Scan failed" >&2 ;;
+    esac
 }
 
 # Echo the SANE source string for whichever input holds a document.
 #   Top ADF feeder (sensor page-loaded)  -> "ADF Duplex"
 #   Front/return slot (sensor card-loaded) -> "Card Duplex"
-# Return codes: 0 with the source on stdout; 1 when both inputs are loaded
-# (an error is printed); 2 when neither is loaded (silent, so callers can
-# emit their own "feeder empty" message).
+# Return codes: 0 with the source on stdout; 2 when neither is loaded (silent);
+# 4 when the device cannot be queried; 5 when both inputs are loaded.
 resolve_source() {
     local device=$1
     local options feeder front
     options=$(scanimage --device "$device" -A 2>&1) || true
+    if echo "$options" | grep -qiE 'open of device .* failed|invalid argument'; then
+        echo "Error: scanner disconnected or device ID changed — reconnect the USB cable" >&2
+        return 4
+    fi
     if [ -z "$options" ] || ! echo "$options" | grep -q 'page-loaded'; then
         echo "Error: scanner not available (busy or disconnected?)" >&2
-        return 1
+        return 4
     fi
     feeder=$(echo "$options" | grep -oP '(?<=--page-loaded\[=\(yes\|no\)\] \[)\w+')
     front=$(echo "$options" | grep -oP '(?<=--card-loaded\[=\(yes\|no\)\] \[)\w+')
 
     if [ "$feeder" = "yes" ] && [ "$front" = "yes" ]; then
         echo "Error: documents loaded in both the feeder and the front slot - use only one." >&2
-        return 1
+        return 5
     elif [ "$feeder" = "yes" ]; then
         echo "ADF Duplex"
     elif [ "$front" = "yes" ]; then
@@ -78,10 +109,28 @@ resolve_source() {
 # files. Holds the scan lock for the whole SANE session.
 scan_pages() {
     local device=$1 prefix=$2
-    local source
-    source=$(resolve_source "$device") || return $?
+    local source rs refreshed tried_refresh=0
+
+    while true; do
+        source=$(resolve_source "$device")
+        rs=$?
+        case "$rs" in
+            0) break ;;
+            2|5) return "$rs" ;;
+            4)
+                if [ "$tried_refresh" -eq 0 ] && refreshed=$(refresh_device 2>/dev/null); then
+                    tried_refresh=1
+                    device=$refreshed
+                    continue
+                fi
+                return 4
+                ;;
+            *) return 4 ;;
+        esac
+    done
+
     echo "Scanning (duplex, color, A4) from $source..."
-    scan_batch "$device" "$source" "$prefix"
+    scan_batch "$device" "$source" "$prefix" || return 3
 }
 
 # Echo which delivery mode the environment selects:
@@ -100,9 +149,11 @@ delivery_mode() {
 
 # Capture one duplex batch into "<prefix>-NNNN.tiff" files from the given
 # SANE source ("ADF Duplex" for the feeder, "Card Duplex" for the front slot).
+# Returns scanimage's exit code so callers can tell I/O errors from an empty input.
 scan_batch() {
     local device=$1 source=$2 prefix=$3
-    scanimage --device "$device" \
+    local output rc
+    output=$(scanimage --device "$device" \
         --format=tiff \
         --resolution "$RESOLUTION" \
         --mode Color \
@@ -117,7 +168,16 @@ scan_batch() {
         --buffermode On \
         --batch="${prefix}-%04d.tiff" \
         --batch-count=-1 \
-        2>&1 | grep -v "^$" || true
+        2>&1) || rc=$?
+    rc=${rc:-0}
+    SCAN_LAST_ERROR=$(printf '%s\n' "$output" \
+        | grep -iE 'scanimage:.*(error|cannot|failed)' \
+        | tail -1 \
+        | sed 's/^scanimage:[[:space:]]*//')
+    if [ -n "$output" ]; then
+        printf '%s\n' "$output" | grep -v "^$" || true
+    fi
+    return "$rc"
 }
 
 # Apply the chosen color treatment to the pages. COLOR_MODE selects:

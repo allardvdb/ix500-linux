@@ -23,14 +23,13 @@ trap 'rm -rf "$WORKDIR"' EXIT
 FILENAME="${1:-scan-$(date '+%Y-%m-%d-%H%M%S')}"
 
 with_scan_lock scan_pages "$DEVICE" "$WORKDIR/page" || {
-    rc=$?
-    [ "$rc" -eq 2 ] && echo "No pages scanned (feeder empty?)" >&2
+    report_capture_failure $?
     exit 1
 }
 
 pages=("$WORKDIR"/page-*.tiff)
-if [ ! -e "${pages[0]}" ]; then
-    echo "No pages scanned (feeder empty?)" >&2
+if [ ! -e "${pages[0]}" ] || [ ! -s "${pages[0]}" ]; then
+    report_capture_failure 3
     exit 1
 fi
 echo "Scanned ${#pages[@]} page(s)"

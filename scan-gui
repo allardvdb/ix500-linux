@@ -29,6 +29,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -207,11 +208,12 @@ class ScanWindow(Gtk.ApplicationWindow):
     def on_capture_done(self, result):
         if not result.ok:
             summary = _capture_error_summary(result.output)
+            detail = _capture_error_detail(result.output)
             if self.doc.pages == 0:
-                self._fail(summary, result.output)
+                self._fail(summary, detail)
                 return
             self._await_next()
-            self._show_alert(summary, result.output)
+            self._show_alert(summary, detail)
             return
 
         if self.page_multi.get_active():
@@ -287,10 +289,40 @@ def _last_line(text):
 
 
 def _capture_error_summary(output):
-    text = (output or "").lower()
-    if "no pages scanned" in text or "feeder empty" in text:
-        return "No document loaded"
+    """Short alert title for a failed capture."""
+    text = output or ""
+    lower = text.lower()
+    if "no scansnap scanner found" in lower or "not connected" in lower \
+            or "disconnected" in lower or "invalid argument" in lower:
+        return "Scanner not connected"
+    if "scanner busy" in lower or "lock" in lower:
+        return "Scanner busy"
+    if "both the feeder" in lower:
+        return "Document in both inputs"
+    if "no document detected" in lower or "feeder empty" in lower:
+        return "No document detected"
+    if "scanner error" in lower or "device i/o" in lower or "cannot load" in lower:
+        return "Scanner error"
     return "Scan failed"
+
+
+def _capture_error_detail(output):
+    """Longer alert detail — the most useful line from scan-doc stderr."""
+    for line in reversed([line.strip() for line in (output or "").splitlines() if line.strip()]):
+        if line.startswith(("Error:", "Scanner error:", "Scanner busy", "No document",
+                            "Documents loaded", "Documents in both")):
+            return line
+        if line.lower().startswith("scanimage:"):
+            return line.split(":", 1)[1].strip()
+    return _last_line(output)
+
+
+def _dev_requested(argv=None):
+    """True when developer mode was requested on the command line or via env."""
+    if os.environ.get("SCAN_GUI_DEV", "").lower() in ("1", "true", "yes"):
+        return True
+    argv = argv if argv is not None else sys.argv
+    return "--dev" in argv or "--debug" in argv
 
 
 class ScanApp(Gtk.Application):
@@ -299,7 +331,7 @@ class ScanApp(Gtk.Application):
             application_id="com.github.scansnaplinux.ScanGui",
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
-        self.dev_mode = False
+        self.dev_mode = _dev_requested()
         self.add_main_option(
             "scan", ord("s"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Trigger a scan in the running window", None,
@@ -307,6 +339,10 @@ class ScanApp(Gtk.Application):
         self.add_main_option(
             "dev", ord("d"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Show developer options (Raw Tiff output)", None,
+        )
+        self.add_main_option(
+            "debug", 0, GLib.OptionFlags.HIDDEN, GLib.OptionArg.NONE,
+            "Alias for --dev", None,
         )
 
     def do_startup(self):
@@ -331,11 +367,23 @@ class ScanApp(Gtk.Application):
         window.trigger_scan()
         return False
 
+    def _window_for_launch(self):
+        """Open a window, replacing a non-dev one when --dev is requested."""
+        window = self.props.active_window
+        if window is None:
+            return ScanWindow(self)
+        if self.dev_mode and not window.dev_mode:
+            window.destroy()
+            return ScanWindow(self)
+        return window
+
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
-        if options.contains("dev"):
+        if options.contains("dev") or options.contains("debug"):
             self.dev_mode = True
-        window = self.props.active_window or ScanWindow(self)
+        elif _dev_requested(command_line.get_arguments()):
+            self.dev_mode = True
+        window = self._window_for_launch()
         window.present()
         if options.contains("scan"):
             GLib.idle_add(self._trigger_scan)
@@ -343,4 +391,4 @@ class ScanApp(Gtk.Application):
 
 
 if __name__ == "__main__":
-    ScanApp().run(None)
+    ScanApp().run(sys.argv)

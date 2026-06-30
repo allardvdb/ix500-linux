@@ -82,11 +82,6 @@ run_headless_scan() {
     fi
 }
 
-# Auto-detect scanner device (fallback when SCANNER_DEVICE is not set)
-detect_device() {
-    scanimage -L 2>/dev/null | grep -oP "$SCANSNAP_DEVICE_RE" | head -1
-}
-
 get_button_state() {
     local output state
     output=$(SCAN_LOCK_TIMEOUT=1 with_scan_lock scanimage --device "$DEVICE" -A 2>/dev/null) || {
@@ -105,11 +100,10 @@ get_button_state() {
 if [ -n "$SCANNER_DEVICE" ]; then
     DEVICE="$SCANNER_DEVICE"
 else
-    DEVICE=$(detect_device)
-fi
-if [ -z "$DEVICE" ]; then
-    log "Error: no ScanSnap scanner found"
-    exit 1
+    DEVICE=$(refresh_device) || {
+        log "Error: no ScanSnap scanner found"
+        exit 1
+    }
 fi
 
 log "Starting button poll for $DEVICE"
@@ -138,7 +132,8 @@ while true; do
         sleep "$DEBOUNCE"
 
     elif [ "$button_state" = "error" ]; then
-        log "Scanner not responding, waiting..."
+        log "Scanner not responding, re-detecting..."
+        refreshed=$(refresh_device 2>/dev/null) && DEVICE="$refreshed"
         sleep 5
     fi
     # "busy" = GUI or another scan holds the lock; retry on the next tick.
